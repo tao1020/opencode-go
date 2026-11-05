@@ -56,6 +56,13 @@ describe('reasoning declarations', () => {
     const model = parsed(modelEntry({ family: 'deepseek', capabilities: { reasoning: { supported: true, toggle: true, effort: ['low', 'medium'] } } }))
     expect(getSupportedThinkingLevels(model)).toEqual(['off', 'low', 'medium'])
   })
+  it('adds the Flash compatibility switch only for its DeepSeek chat protocol', () => {
+    const choices = (id: string, entry: Record<string, unknown>) => reasoningChoices(readModelDirectory(modelsDocument({ [id]: entry }), 'https://gateway.example/v1').models.get(id)!).map(choice => choice.id)
+    expect(choices('deepseek-v4.1-flash', modelEntry({ family: 'deepseek' }))).toEqual(['off', 'low', 'high', 'max'])
+    expect(choices('future-deepseek', modelEntry({ family: 'deepseek' }))).toEqual(['low', 'high', 'max'])
+    expect(choices('deepseek-v4.1-flash', modelEntry())).toEqual(['low', 'high', 'max'])
+    expect(choices('deepseek-v4.1-flash', modelEntry({ family: 'deepseek', capabilities: { reasoning: { supported: true, toggle: false, effort: ['high'] } } }))).toEqual(['high'])
+  })
   it('does not offer a generic toggle without a known wire format', () => {
     expect(getSupportedThinkingLevels(parsed(modelEntry({ capabilities: { reasoning: { supported: true, toggle: true } } })))).toEqual([])
   })
@@ -71,6 +78,28 @@ describe('reasoning declarations', () => {
 })
 
 describe('reasoning through Harness and SDK', () => {
+  it.each([undefined, 'off', 'low', 'high', 'max'] as const)('serializes Flash thinking selection %s without changing provider identity', async effort => {
+    const id = 'deepseek-v4.1-flash'
+    const gateway = await mockGateway({ status: 200, body: modelsDocument({ [id]: modelEntry({ family: 'deepseek-flash' }) }) })
+    const adapter = new OpencodeGoAdapter({ config: () => configOf(gateway.url), resolveApiKey: async () => 'key' })
+    const ctx = new Context(); await ctx.plugin(LlmRuntime); ctx.llm.registerAdapter(['dsh-opencode-go'], adapter)
+    try {
+      expect(ctx.llm.listProviders()).toEqual([{ id: 'dsh-opencode-go', name: 'Default' }])
+      const info = await ctx.llm.resolveModelInfo('dsh-opencode-go', id)
+      expect(info.reasoning?.efforts.map(choice => choice.id)).toEqual(['off', 'low', 'high', 'max'])
+      expect(info.reasoning?.defaultEffort).toBeUndefined()
+      gateway.pushCompletions({ events: textEvents })
+      await drain(ctx.llm.stream(requestOf({ model: id, ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }) })))
+      const body = gateway.bodies.at(-1)
+      if (effort === undefined) {
+        expect(body).not.toHaveProperty('thinking')
+        expect(body).not.toHaveProperty('reasoning_effort')
+      } else if (effort === 'off') {
+        expect(body).toHaveProperty('thinking', { type: 'disabled' })
+        expect(body).not.toHaveProperty('reasoning_effort')
+      } else expect(body).toMatchObject({ thinking: { type: 'enabled' }, reasoning_effort: effort })
+    } finally { await ctx.fiber.dispose() }
+  })
   it.each(['chat-completions', 'messages'])('serializes inherited effort with partial %s reasoning capabilities', async protocol => {
     const id = 'partial-reasoning'
     const gateway = await mockGateway({ status: 200, body: modelsDocument({ [id]: modelEntry({

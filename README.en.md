@@ -22,6 +22,15 @@ DSH already supports OpenCode Go natively. This plugin focuses on usage inside c
 
 Supports Chinese and English, following DSH's interface language. The screenshots below show the Chinese interface.
 
+## Changes in this fork
+
+- The model picker's `DSH OpenCode Go` group is named `Default`. Provider IDs, accounts and settings are unchanged; the Free group remains `DSH OpenCode Free`.
+- DeepSeek V4.1 Flash offers an `Off` thinking level, sending `thinking: {"type":"disabled"}` without `reasoning_effort`. Other levels and the unspecified default are unchanged.
+- There is no interception of `DeepSeek Account`. Select a model under `Default` to use Go credits.
+- `Default` is not pinned first: the current DSH picker hardcodes DeepSeek Account and DeepSeek ahead of third-party groups and exposes no plugin ordering API.
+
+The Flash compatibility rule applies only to DeepSeek Chat Completions. An explicit catalog `toggle: false` is still respected.
+
 ## View subscription usage
 
 Click the usage pill beside the conversation input to open the current account's subscription usage. Bars show the **percentage used**, turn amber near the limit, and red when exhausted. Each quota window shows its reset time.

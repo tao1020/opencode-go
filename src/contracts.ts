@@ -14,7 +14,7 @@ import type {
 /** Public DSH route and the private SDK transport have separate identities. */
 export const PROVIDER_ID = 'dsh-opencode-go'
 
-export const DISPLAY_NAME = 'DSH OpenCode Go'
+export const DISPLAY_NAME = 'Default'
 
 export const FREE_PROVIDER_ID = 'dsh-opencode-free'
 
