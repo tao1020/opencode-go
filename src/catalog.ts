@@ -267,7 +267,13 @@ function reasoningControls(api: Api, data: Record<string, unknown>, compat: Mode
   const budget = object(reasoning.budget)
   const tokenBudget = budget !== undefined && supportsThinkingBudget(api, compat)
   if (efforts.length === 0 && (native && reasoning.toggle === true || tokenBudget)) map.high = 'high'
-  if (native && reasoning.toggle === true && map.off === null) delete map.off
+  // The Go Flash listing omits toggle although its DeepSeek chat protocol
+  // supports thinking:{type:'disabled'}. Keep this compatibility exception
+  // exact: other reasoning-only models must not acquire an invented Off mode.
+  const flashToggle = api === 'openai-completions' && format === 'deepseek'
+    && data.id === 'deepseek-v4.1-flash'
+    && reasoning.toggle !== false
+  if (native && (reasoning.toggle === true || flashToggle) && map.off === null) delete map.off
   return { reasoning: true, thinkingLevelMap: map,
     reasoningControl: tokenBudget && efforts.length === 0 ? 'budget'
       : native && efforts.length === 0 && reasoning.toggle === true ? 'toggle' : 'effort',

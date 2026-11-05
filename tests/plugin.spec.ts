@@ -45,7 +45,7 @@ describe("route lifecycle", () => {
   const MODEL_IMAGE_PATH = '/model/.dsh/attachments/objects/aa/object'
 
   async function waitForRoute(ctx: Context): Promise<void> {
-    await expect.poll(() => ctx.llm.listProviders(), { timeout: 10_000 }).toContainEqual({ id: 'dsh-opencode-go', name: 'DSH OpenCode Go' })
+    await expect.poll(() => ctx.llm.listProviders(), { timeout: 10_000 }).toContainEqual({ id: 'dsh-opencode-go', name: 'Default' })
   }
 
   class MappedFileSystem extends Service {
@@ -573,7 +573,7 @@ describe("Loader composition", () => {
       ])
 
       await expect.poll(() => ctx.llm.listProviders())
-        .toContainEqual({ id: 'dsh-opencode-go', name: 'DSH OpenCode Go' })
+        .toContainEqual({ id: 'dsh-opencode-go', name: 'Default' })
       expect((await ctx.llm.resolveModelInfo('dsh-opencode-go', 'deepseek-v4.1-flash')).context?.contextWindow)
         .toBe(123456)
       expect(gateway.paths).toEqual(['/models'])
@@ -591,7 +591,7 @@ describe("Loader composition", () => {
       ])
 
       await expect.poll(() => ctx.llm.listProviders(), { timeout: 10_000 })
-        .toContainEqual({ id: 'dsh-opencode-go', name: 'DSH OpenCode Go' })
+        .toContainEqual({ id: 'dsh-opencode-go', name: 'Default' })
       // The supplemented model reaches the picker through the loaded row.
       await expect(ctx.llm.listModels('dsh-opencode-go')).resolves.toContainEqual(
         expect.objectContaining({ id: 'deepseek-v4.1-flash' }),
@@ -638,7 +638,7 @@ describe("Loader composition", () => {
       ])
 
       await expect.poll(() => ctx.llm.listProviders(), { timeout: 10_000 })
-        .toContainEqual({ id: 'dsh-opencode-go', name: 'DSH OpenCode Go' })
+        .toContainEqual({ id: 'dsh-opencode-go', name: 'Default' })
     })
   })
 })
@@ -686,7 +686,7 @@ describe('profile forms and live configuration', () => {
   it('exposes one custom form and changes activation, model visibility and capacities without remounting', async () => {
     const gateway = await mockGateway({ status: 200, body: listingBody(['deepseek-v4.1-flash']) })
     const { ctx, entry, fiber, view } = await profile(gateway.url)
-    await expect.poll(() => ctx.llm.listProviders()).toContainEqual({ id: 'dsh-opencode-go', name: 'DSH OpenCode Go' })
+    await expect.poll(() => ctx.llm.listProviders()).toContainEqual({ id: 'dsh-opencode-go', name: 'Default' })
     expect((await ctx.llm.listModels('dsh-opencode-go')).map(model => model.id)).toEqual(['deepseek-v4.1-flash'])
     const before = view()
     await ctx.settings.update('opencode-go', { enabled: false }, before.revision)
@@ -796,7 +796,7 @@ describe("independent provider identity and durable continuation", () => {
       apply(ctx, configOf(gateway.url))
       if (order === 'before') ctx.llm.registerAdapter(['opencode-go'], new HostAdapter())
       expect(ctx.llm.listProviders()).toEqual(expect.arrayContaining([
-        { id: 'opencode-go', name: 'Host pi-ai' }, { id: route, name: 'DSH OpenCode Go' },
+        { id: 'opencode-go', name: 'Host pi-ai' }, { id: route, name: 'Default' },
       ]))
       expect(await ctx.llm.listModels('opencode-go')).toEqual([{ provider: 'opencode-go', id: 'host-model', name: 'Host model' }])
       expect(await ctx.llm.resolveModelInfo(route, 'deepseek-v4.1-flash')).toMatchObject({ provider: route })

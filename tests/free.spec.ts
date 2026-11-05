@@ -35,7 +35,7 @@ describe('dual route registration', () => {
     const ctx = context(); await ctx.plugin(LlmRuntime)
     apply(ctx, configOf(go.url, { freeBaseURL: free.url }))
     expect(ctx.llm.listProviders()).toEqual(expect.arrayContaining([
-      { id: 'dsh-opencode-go', name: 'DSH OpenCode Go' }, { id: 'dsh-opencode-free', name: 'DSH OpenCode Free' },
+      { id: 'dsh-opencode-go', name: 'Default' }, { id: 'dsh-opencode-free', name: 'DSH OpenCode Free' },
     ]))
     expect((await ctx.llm.listModels('dsh-opencode-go')).map(model => model.id)).toEqual(['beam-free', 'go-only'])
     expect(await ctx.llm.listModels('dsh-opencode-free')).toEqual([expect.objectContaining({ provider: 'dsh-opencode-free', id: 'beam-free' })])

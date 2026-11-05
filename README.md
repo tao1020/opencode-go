@@ -17,6 +17,15 @@ DSH 原生支持接入 OpenCode Go，但原生模式无法满足复杂的生产�
 
 ---
 
+## 这个 fork 的改动
+
+- 模型选择器中的 `DSH OpenCode Go` 改名为 `Default`。只改显示名称，provider ID、账号和设置不变；免费分组仍叫 `DSH OpenCode Free`。
+- DeepSeek V4.1 Flash 增加 `Off` 思考档位，发送 `thinking: {"type":"disabled"}`，不发送 `reasoning_effort`。其他档位和未选择档位时的行为不变。
+- 不拦截 `DeepSeek Account`。要使用 Go 额度，请选择 `Default` 分组中的模型。
+- `Default` 暂不置顶：当前 DSH 选择器固定将 DeepSeek Account 和 DeepSeek 排在第三方分组之前，未提供插件排序接口。
+
+Flash 的兼容规则只适用于 DeepSeek Chat Completions 协议；目录显式声明 `toggle: false` 时仍尊重该限制。
+
 ## ✨ 核心特性
 
 - 🆓 **双路由动态模型目录**：Go 与平台免费模型分别从各自网关的 `/models` 发现，保留同名模型；Free 无 Key 时可使用公共访问，两套模型开关与容量设置独立。

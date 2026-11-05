@@ -3,7 +3,7 @@ import type { RemoteResult, TypertRemoteContribution } from '@deepseek-ai/dsh-ty
 import type { AnalyticsFailureReason, AnalyticsQuery, AnalyticsReport } from './analytics.ts';
 /** Public DSH route and the private SDK transport have separate identities. */
 export declare const PROVIDER_ID = "dsh-opencode-go";
-export declare const DISPLAY_NAME = "DSH OpenCode Go";
+export declare const DISPLAY_NAME = "Default";
 export declare const FREE_PROVIDER_ID = "dsh-opencode-free";
 export declare const FREE_DISPLAY_NAME = "DSH OpenCode Free";
 export type ModelSource = 'go' | 'free';

@@ -480,7 +480,7 @@ describe("requests and deadlines", () => {
 
       await expect(adapter.resolveModel(PROVIDER_ID, 'absent'))
         .rejects.toMatchObject({ code: 'UNKNOWN_MODEL' })
-      expect(adapter.providerInfo(PROVIDER_ID)).toEqual({ id: PROVIDER_ID, name: 'DSH OpenCode Go' })
+      expect(adapter.providerInfo(PROVIDER_ID)).toEqual({ id: PROVIDER_ID, name: 'Default' })
     })
 
     it('applies and removes capacities immediately without dropping the catalog cache', async () => {
