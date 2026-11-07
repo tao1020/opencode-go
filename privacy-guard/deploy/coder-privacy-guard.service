@@ -1,0 +1,53 @@
+[Unit]
+Description=OpenCode Go privacy guard (model-upstream masking and local restore)
+Documentation=file:/usr/local/share/doc/privacy-guard/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Dedicated non-login account. Some Coder containers cannot grant DynamicUser
+# access to LoadCredential mounts; do not solve that by running as root.
+User=opencode-privacy
+Group=opencode-privacy
+UMask=0077
+CapabilityBoundingSet=
+
+# Directory: opencode-privacy, 0700. Both regular files: same owner, 0600.
+# Only paths, never credential values, are placed in the environment.
+Environment=GUARD_LISTEN=127.0.0.1:8788
+Environment=CLIENT_API_KEY_FILE=/etc/opencode-go-privacy/client.key
+Environment=UPSTREAM_API_KEY_FILE=/etc/opencode-go-privacy/upstream.key
+
+# OpenCode Go subscription endpoint; not the paid-per-token Zen endpoint.
+Environment=UPSTREAM_URL=https://opencode.ai/inference/go/openai/v1/chat/completions
+
+# Mandatory on Coder. Without it the proxy forwards one-way masked text and the
+# client can never restore the original value.
+Environment=GUARD_REVERSIBLE=true
+
+Environment=GUARD_REQUEST_TIMEOUT=10m
+Environment=GUARD_RESPONSE_IDLE_TIMEOUT=2m
+Environment=GUARD_MAX_CONCURRENCY=8
+
+ExecStart=/usr/local/bin/privacy-guard
+Restart=on-failure
+RestartSec=2
+
+# Keep the process unprivileged and its filesystem read-only.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

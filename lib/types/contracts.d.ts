@@ -115,6 +115,14 @@ export interface OpencodeGoConfig {
     requestImageMaxBytes: number;
     /** Per-model capacity overrides; an absent field inherits the catalog value. */
     modelLimits: OpencodeGoModelLimits;
+    /** Enable outbound masking through the local privacy daemon. */
+    privacyEnabled?: boolean;
+    /** Loopback origin of the privacy daemon. */
+    privacyEndpoint?: string;
+    /** Absolute key-file path; empty selects the default home-relative location. */
+    privacyKeyFile?: string;
+    /** Bound on one `/mask` call, in milliseconds. */
+    privacyTimeoutMs?: number;
 }
 /** Settings snapshots may omit fields inherited from their base layer. */
 export type OpencodeGoSettings = Partial<OpencodeGoConfig>;

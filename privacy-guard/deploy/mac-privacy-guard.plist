@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Scan-only example: no UPSTREAM_URL. Local /mask, /inspect and /healthz
+  endpoints are available; no request is forwarded upstream.
+
+  Replace __HOME__ before loading, for example:
+    sed "s|__HOME__|$HOME|g" mac-privacy-guard.plist \
+      > ~/Library/LaunchAgents/local.opencode-go.privacy-guard.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.opencode-go.privacy-guard</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/.local/lib/privacy-guard/bin/privacy-guard</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>GUARD_LISTEN</key>
+		<string>127.0.0.1:8788</string>
+		<key>CLIENT_API_KEY_FILE</key>
+		<string>__HOME__/.local/state/privacy-guard/client-key</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>__HOME__/.local/state/privacy-guard/guard.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>__HOME__/.local/state/privacy-guard/guard.log</string>
+</dict>
+</plist>

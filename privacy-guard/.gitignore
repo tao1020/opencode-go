@@ -1,0 +1,6 @@
+/coder-privacy-guard
+/coder-privacy-guard.exe
+/guard
+/guard.exe
+__pycache__/
+*.pyc

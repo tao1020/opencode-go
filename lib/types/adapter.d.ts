@@ -4,6 +4,7 @@ import { type GenerateOptions, type ImageAttachmentAccess, type StreamChunk, Llm
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
 import type { Api, Model, Provider } from './sdk-types.ts';
 import { type OpencodeGoConfig } from './config.ts';
+import { type PrivacyMaskClient } from './privacy.ts';
 import { ProxyTransport } from './transport.ts';
 import { OpencodeGoCatalog } from './catalog.ts';
 /**
@@ -37,6 +38,13 @@ export interface OpencodeGoRequestExecutorOptions {
     imageAccess?: OpencodeGoImageAccess;
     /** Observe assistant history degrading to provider-neutral conversion. */
     onReplayDegrade?: (reason: string) => void;
+    /**
+     * Outbound mask client. Required when `privacyEnabled` is set: the adapter
+     * refuses to send an unmasked payload rather than falling back silently.
+     */
+    privacy?: PrivacyMaskClient;
+    /** Observe advisory privacy facts such as uninspected media; never blocks. */
+    onPrivacyWarning?: (reason: string) => void;
 }
 /** Inputs already resolved by the adapter, including one account and the wire session ID. */
 export interface OpencodeGoRequestSnapshot {

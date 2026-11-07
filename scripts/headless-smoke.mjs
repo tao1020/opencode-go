@@ -1,5 +1,6 @@
 /** Run the installed plugin through the shipped headless profile against a local gateway. */
 import assert from 'node:assert/strict'
+import { modelsDocument } from '../tests/support/data.ts'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { spawn } from 'node:child_process'
@@ -11,18 +12,26 @@ const root = resolve(process.argv[2] ?? '.')
 const scratch = await mkdtemp(join(tmpdir(), 'dsh-go-headless-'))
 const patch = join(scratch, 'smoke.patch.yml')
 const requests = []
+const privacyEndpoint = process.env.PRIVACY_SMOKE_ENDPOINT
+const privacyKeyFile = process.env.PRIVACY_SMOKE_KEY_FILE
+const syntheticSecret = 'SyntheticHarnessReview123!'
+const capturedBodies = []
+if (privacyEndpoint && !privacyKeyFile) throw new Error('PRIVACY_SMOKE_KEY_FILE is required')
 const server = createServer((request, response) => {
-  request.resume()
+  let body = ''
+  request.on('data', chunk => { body += chunk })
   request.on('end', () => {
     if (request.url === '/models') {
       response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ data: [{ id: 'deepseek-v4.1-flash' }] }))
+      response.end(JSON.stringify(modelsDocument()))
       return
     }
     requests.push(request.headers)
+    capturedBodies.push(body)
+    const echoed = privacyEndpoint ? body.match(/__PG_[0-9a-f]{32}__/)?.[0] : 'standalone-ok'
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     for (const event of [
-      { choices: [{ delta: { role: 'assistant', content: 'standalone-ok' }, index: 0, finish_reason: null }] },
+      { choices: [{ delta: { role: 'assistant', content: echoed ?? 'missing-masked-token' }, index: 0, finish_reason: null }] },
       { choices: [{ delta: {}, index: 0, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 1 } },
     ]) response.write(`data: ${JSON.stringify(event)}\n\n`)
     response.end('data: [DONE]\n\n')
@@ -34,8 +43,12 @@ try {
   await symlink(resolve(root, 'node_modules'), join(scratch, 'home', 'node_modules'), 'junction')
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
-  await writeFile(patch, `- insert:\n    - id: opencode-go-smoke\n      name: dsh-opencode-go\n      config:\n        apiKeyEnv: OPENCODE_GO_INSTALL_TEST_KEY\n        baseURL: http://127.0.0.1:${server.address().port}\n- id: agent-default-model\n  config:\n    provider: dsh-opencode-go\n    model: deepseek-v4.1-flash\n- id: session-title-llm\n  disabled: true\n`)
-  child = spawn(resolve(root, 'node_modules/.bin/dsh'), ['--profile', 'headless', '--patch', patch, 'Say standalone-ok'], {
+  await writeFile(patch, `- insert:\n    - id: opencode-go-smoke\n      name: ${JSON.stringify(join(root, 'lib/index.js'))}\n      config:\n        apiKeyEnv: OPENCODE_GO_INSTALL_TEST_KEY\n        baseURL: http://127.0.0.1:${server.address().port}\n- id: agent-default-model\n  config:\n    provider: dsh-opencode-go\n    model: deepseek-v4.1-flash\n- id: session-title-llm\n  disabled: true\n`)
+  if (privacyEndpoint) {
+    const { appendFile } = await import('node:fs/promises')
+    await appendFile(patch, `- id: opencode-go-smoke\n  config:\n    apiKeyEnv: OPENCODE_GO_INSTALL_TEST_KEY\n    baseURL: http://127.0.0.1:${server.address().port}\n    privacyEnabled: true\n    privacyEndpoint: ${JSON.stringify(privacyEndpoint)}\n    privacyKeyFile: ${JSON.stringify(privacyKeyFile)}\n`)
+  }
+  child = spawn(resolve(root, 'node_modules/.bin/dsh'), ['--profile', 'headless', '--patch', patch, privacyEndpoint ? `Repeat this password exactly: password="${syntheticSecret}"` : 'Say standalone-ok'], {
     cwd: root,
     env: { PATH: process.env.PATH, HOME: process.env.HOME, DSH_HOME: join(scratch, 'home'), OPENCODE_GO_INSTALL_TEST_KEY: 'fixture-key' },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -47,7 +60,13 @@ try {
   try {
     const [code] = await once(child, 'exit')
     assert.equal(code, 0, stderr)
-    assert.match(stdout, /standalone-ok/)
+    if (privacyEndpoint) {
+      assert.ok(stdout.includes(syntheticSecret), 'DSH output must restore the synthetic secret')
+      assert.ok(capturedBodies.every(body => !body.includes(syntheticSecret)), 'upstream must never receive the secret')
+      assert.ok(capturedBodies.every(body => /__PG_[0-9a-f]{32}__/.test(body)), 'upstream must receive a mask')
+    } else {
+      assert.match(stdout, /standalone-ok/)
+    }
     assert.ok(requests.length > 0)
     assert.ok(requests.every(headers => headers['x-opencode-session']?.length > 0))
     console.log('PASS: official dsh headless profile completes a task through the installed OpenCode Go plugin')
