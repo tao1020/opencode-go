@@ -34,6 +34,13 @@ import { GoUsageService, GoAccountManager, GoAccountsService } from './accounts.
 import { GoAnalyticsService, analyticsPriceBook, type AnalyticsSessionQuery } from './analytics.ts'
 import { accountsOf, accountRefOf, SETTINGS_NAMESPACE, goRemote } from './contracts.ts'
 import { ProxyTransport } from './transport.ts'
+import {
+  createHttpPrivacyClient,
+  DEFAULT_PRIVACY_ENDPOINT,
+  DEFAULT_PRIVACY_KEY_FILE,
+  DEFAULT_PRIVACY_TIMEOUT_MS,
+  type PrivacyMaskClient,
+} from './privacy.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
@@ -81,6 +88,17 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
   // refuses the write through the section's validate hook.
   validateGoConfig(entry)
   const current = (): OpencodeGoConfig => readConfig(config)
+  // Built once at load: enabling privacy without a usable key file or a
+  // loopback endpoint fails here, not on the first request.
+  const privacy: PrivacyMaskClient | undefined = entry.privacyEnabled === true
+    ? createHttpPrivacyClient({
+        endpoint: entry.privacyEndpoint ?? DEFAULT_PRIVACY_ENDPOINT,
+        apiKeyFile: entry.privacyKeyFile === undefined || entry.privacyKeyFile.length === 0
+          ? DEFAULT_PRIVACY_KEY_FILE
+          : entry.privacyKeyFile,
+        timeoutMs: entry.privacyTimeoutMs ?? DEFAULT_PRIVACY_TIMEOUT_MS,
+      })
+    : undefined
 
   const resolveApiKey = async (config: OpencodeGoConfig = current()): Promise<string | undefined> => {
     // Compare through accountRefOf so a stray empty string keeps the default
@@ -157,7 +175,16 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
       ctx.logger.warn(`llm-opencode-go: unusable replay state on assistant history; sending provider-neutral content (${reason})`)
     },
   }
-  const adapter = new OpencodeGoAdapter({ ...adapterOptions, catalog: config => catalogs.forConfig(config) })
+  // The paid Go adapter owns the privacy callback. The free adapter is built
+  // from the same base options but never receives one.
+  const paidAdapterOptions = {
+    ...adapterOptions,
+    privacy,
+    onPrivacyWarning: (reason: string) => {
+      ctx.logger.warn(`llm-opencode-go: privacy warning (${reason}); image pixels are not scanned`)
+    },
+  }
+  const adapter = new OpencodeGoAdapter({ ...paidAdapterOptions, catalog: config => catalogs.forConfig(config) })
   const freeAdapter = new OpencodeGoAdapter({ ...adapterOptions, source: 'free', catalog: config => catalogs.forConfig(config, 'free') })
   ctx.plugin(GoModelsService, {
     catalog: () => catalogs.forConfig(current()),

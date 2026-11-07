@@ -19,6 +19,8 @@ DSH 原生支持接入 OpenCode Go，但原生模式无法满足复杂的生产�
 
 ## 这个 fork 的改动
 
+- 增加默认关闭的本地文本秘密保护，仅覆盖 Go 的 `deepseek-v4.1-flash` Chat 路径。发送前替换识别出的秘密，响应和工具参数在本地还原。其他模型保持原样，不宣称受保护。参见[配置与限制](<docs/privacy.md>)、[本地服务说明](<privacy-guard/README.md>)。
+
 - 模型选择器中的 `DSH OpenCode Go` 改名为 `Default`。只改显示名称，provider ID、账号和设置不变；免费分组仍叫 `DSH OpenCode Free`。
 - DeepSeek V4.1 Flash 增加 `Off` 思考档位，发送 `thinking: {"type":"disabled"}`，不发送 `reasoning_effort`。其他档位和未选择档位时的行为不变。
 - 不拦截 `DeepSeek Account`。要使用 Go 额度，请选择 `Default` 分组中的模型。

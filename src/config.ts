@@ -20,6 +20,7 @@ import {
   assertAccounts,
 } from './contracts.ts'
 import type { Context } from '@deepseek-ai/cordis'
+import { DEFAULT_PRIVACY_ENDPOINT, DEFAULT_PRIVACY_TIMEOUT_MS, assertPrivacyEndpoint } from './privacy.ts'
 
 export type { OpencodeGoConfig, OpencodeGoModelLimit, OpencodeGoModelLimits } from './contracts.ts'
 
@@ -71,6 +72,12 @@ const fields = {
     maxTokens: z.union([z.const(null), z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)]),
     thinkingBudgets: z.union([z.const(null), z.array(z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required()).max(16)]),
   })])).default({}),
+  // Outbound masking through the local privacy daemon. Disabled by default.
+  // Enabling it without a reachable daemon fails closed at the adapter.
+  privacyEnabled: z.boolean().default(false),
+  privacyEndpoint: z.string().default(DEFAULT_PRIVACY_ENDPOINT),
+  privacyKeyFile: z.string().default(''),
+  privacyTimeoutMs: z.number().step(1).min(1000).max(60_000).default(DEFAULT_PRIVACY_TIMEOUT_MS),
 }
 
 /** Plain configuration values used by validation and direct adapter consumers. */
@@ -135,6 +142,9 @@ export function validateGoConfig(value: OpencodeGoConfig): void {
   assertProxyURL(value.proxyURL)
   assertApiKeyEnv(value.apiKeyEnv)
   assertAccounts(value.accounts, value.apiKeyEnv)
+  // Pure endpoint/path validation only: no filesystem read, and an empty key
+  // path keeps its home-relative default.
+  if (value.privacyEnabled === true) assertPrivacyEndpoint(value.privacyEndpoint ?? DEFAULT_PRIVACY_ENDPOINT)
 }
 
 /** DSH profile forms edit the plugin's live Config fields directly. */

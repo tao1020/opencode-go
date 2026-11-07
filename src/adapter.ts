@@ -33,6 +33,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './config.ts'
 import { toPiContext, toStreamChunks, type PiImageRequestContext } from './conversion.ts'
+import { createMaskState, restoreChunks, type PrivacyMaskClient } from './privacy.ts'
 import { GatewayDiagnostics, waitWithSignal, ProxyTransport } from './transport.ts'
 import {
   reasoningChoices,
@@ -86,6 +87,13 @@ export interface OpencodeGoRequestExecutorOptions {
   imageAccess?: OpencodeGoImageAccess
   /** Observe assistant history degrading to provider-neutral conversion. */
   onReplayDegrade?: (reason: string) => void
+  /**
+   * Outbound mask client. Required when `privacyEnabled` is set: the adapter
+   * refuses to send an unmasked payload rather than falling back silently.
+   */
+  privacy?: PrivacyMaskClient
+  /** Observe advisory privacy facts such as uninspected media; never blocks. */
+  onPrivacyWarning?: (reason: string) => void
 }
 
 /** Inputs already resolved by the adapter, including one account and the wire session ID. */
@@ -133,6 +141,44 @@ export class OpencodeGoRequestExecutor {
       : AbortSignal.any([options.signal, consumer.signal])
     using watchdog = idleWatchdog(upstream, config.streamIdleTimeoutMs, 'LLM_STREAM_IDLE_TIMEOUT')
     using preparation = deadline(watchdog.signal, config.requestPreparationTimeoutMs ?? DEFAULT_REQUEST_PREPARATION_TIMEOUT_MS, 'LLM_PREPARATION_TIMEOUT')
+
+    // Protection is confirmed for exactly one route: paid Go, Flash, on the
+    // OpenAI chat-completions protocol. Every other Go model and the free route
+    // stays unprotected; there is no automatic switch.
+    const privacyCandidate = String(options.provider) === PROVIDER_ID
+      && model.id === 'deepseek-v4.1-flash'
+    const privacyRoute = privacyCandidate && model.api === 'openai-completions'
+    const privacyEnabled = config.privacyEnabled === true
+    if (privacyEnabled && privacyCandidate && !privacyRoute) {
+      // Approved for Flash, but the catalog reported a protocol this client
+      // cannot mask. Fail before upstream instead of silently bypassing.
+      throw new LlmError('llm-opencode-go: privacy is enabled but the Flash model uses an unsupported protocol', 'PRIVACY_UNSUPPORTED_PROTOCOL')
+    }
+    if (privacyEnabled && privacyRoute && this.options.privacy === undefined) {
+      throw new LlmError('llm-opencode-go: privacy is enabled but no mask client is configured', 'PRIVACY_SERVICE_UNAVAILABLE')
+    }
+    // A live disable takes effect immediately: the client is not invoked.
+    const privacy = privacyEnabled && privacyRoute ? this.options.privacy : undefined
+    const maskState = privacy === undefined ? undefined : createMaskState()
+    let maskFailure: unknown
+    const onPayload = privacy === undefined || maskState === undefined
+      ? undefined
+      : async (payload: unknown): Promise<unknown> => {
+        try {
+          const result = await privacy.mask(payload, {
+            provider: String(options.provider),
+            model: model.id,
+            sessionId,
+          }, watchdog.signal)
+          // Advisory only: image pixels are not scanned, and the request still runs.
+          if (result.uninspectedMedia) this.options.onPrivacyWarning?.('uninspected-media')
+          maskState.publish(result.mappings)
+          return result.payload
+        } catch (error) {
+          maskFailure = error
+          throw error
+        }
+      }
 
     try {
       const apiKey = snapshot.apiKey ?? await waitWithSignal(
@@ -200,8 +246,10 @@ export class OpencodeGoRequestExecutor {
         // The agent recovery layer owns visible attempts; one adapter call is
         // one SDK attempt.
         maxRetries: 0,
+        ...(onPayload === undefined ? {} : { onPayload }),
       })
-      const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id, options.provider, maxTokens)[Symbol.asyncIterator]()
+      const converted = toStreamChunks(events, model.contextWindow, options.signal, model.id, options.provider, maxTokens)
+      const iterator = (maskState === undefined ? converted : restoreChunks(converted, maskState, () => maskFailure))[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {

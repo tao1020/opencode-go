@@ -26,3 +26,20 @@ jobs:
           cache: npm
       - run: npm ci --strict-peer-deps
       - run: npm run verify
+
+  privacy-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Official Go image, pinned by tag; the module needs Go 1.24.11 or newer.
+    container: golang:1.25
+    defaults:
+      run:
+        working-directory: privacy-guard
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...

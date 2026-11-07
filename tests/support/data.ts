@@ -27,7 +27,7 @@ export function fixtureModels(): Record<string, Record<string, unknown>> {
   return {
     'deepseek-v4-pro': modelEntry({ name: 'DeepSeek V4 Pro', family: 'deepseek', modalities: { input: ['text'] },
       capabilities: { reasoning: { supported: true, effort: ['low', 'high', 'max'], toggle: true } } }),
-    'deepseek-v4.1-flash': modelEntry({ name: 'DeepSeek V4.1 Flash', family: 'deepseek' }),
+    'deepseek-v4.1-flash': modelEntry({ name: 'DeepSeek V4.1 Flash', family: 'deepseek', api: protocolEntry('chat-completions') }),
     'kimi-k3': modelEntry({ name: 'Kimi K3' }),
     'minimax-m3': modelEntry({ name: 'MiniMax-M3', api: protocolEntry('messages'),
       capabilities: { reasoning: { supported: true, toggle: true } } }),
