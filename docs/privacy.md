@@ -79,11 +79,12 @@ POST /mask
       "uninspectedMedia": false }
 ```
 
-- `scope` is a per-session random 16-byte hex namespace held in process memory.
-  It is never the raw session id and never persisted; an empty session id gets
-  a fresh scope per request. A restart therefore rotates the scope and old
-  tokens in session history become foreign; the daemon re-masks them as opaque
-  values instead of resolving them.
+- `scope` is a per-session keyed 16-byte hex namespace derived from the local client key and session ID.
+  It is never the raw session ID. An empty session ID gets a fresh scope per
+  request. A new client with the same key preserves a named session scope.
+  Credential mode also derives stable tokens, so original history can rebuild
+  the same masked prefix after a daemon restart. Unknown token literals are
+  re-masked as opaque values.
 - Tokens match `^__PG_[0-9a-f]{32}__$`.
 - `originalType: "number"` restores an exact numeric JSON value. On Node
   22.19+/24 the client emits the original literal through `JSON.rawJSON`, so
@@ -164,3 +165,20 @@ Explicit assignments such as `password="left"`, quoted values, and `token is lef
 remain masked. Other ambiguous natural-language statements can still produce
 false positives. Old tokens whose vault has been lost restore to their literal
 text only. Recovering the original secret requires the original local data.
+
+
+## Lightweight credential detector
+
+Run the daemon with `GUARD_DETECTOR=credentials` to select the credential-only
+regex detector and bounded detection-position cache. The default remains the
+legacy Gitleaks detector. The deployment templates select credential mode.
+See `privacy-guard/README.md` for Mac/Linux setup and both client routes.
+
+Credential mode covers explicit AK/SK, password and username fields, common
+credential formats, authentication headers and URL credentials. It does not
+claim general personal-data detection. Every request still applies its current
+secret set throughout the payload. The cache never stores masked prefixes.
+
+Text restoration emits ordinary text immediately and buffers only a possible
+partial placeholder. Tool arguments are still validated and restored before
+execution. No source from the surveyed third-party proxy projects was copied.

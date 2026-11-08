@@ -21,9 +21,12 @@ root = Path(tempfile.mkdtemp(prefix='privacy-dev-flow-'))
 fixture = root / 'settings.env'
 secret = 'DevFlowSyntheticSecret9!OnlyTest'
 prompt_secret = 'PromptSyntheticSecret8!OnlyTest'
-fixture.write_text(f'DB_PASSWORD="{secret}"\nPORT=8000\n')
+extra_credentials = ('alice_synthetic', 'LTAIabcdefghijklmnop', 'SyntheticSecretAccessKey123!')
+extra_config = f'DB_USERNAME="{extra_credentials[0]}"\nACCESS_KEY_ID="{extra_credentials[1]}"\nSECRET_ACCESS_KEY="{extra_credentials[2]}"\n'
+fixture.write_text(f'DB_PASSWORD="{secret}"\nPORT=8000\n'+extra_config)
 fixture.chmod(0o600)
 observations = []
+session_scopes = set()
 failures = []
 completed = threading.Event()
 
@@ -33,16 +36,20 @@ class FakeModel(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-            if any(value.encode() in raw for value in (secret, prompt_secret)):
+            if any(value.encode() in raw for value in (secret, prompt_secret, *extra_credentials)):
                 failures.append('raw file or CLI-prompt secret reached fake upstream')
             body = json.loads(raw)
             is_development = any(t.get('function',{}).get('name') == 'read' for t in body.get('tools', []))
             observations.append({'model':body.get('model'), 'reasoning':body.get('reasoning_effort'), 'session_header':bool(self.headers.get('x-opencode-session')), 'kind':'development' if is_development else 'auxiliary'})
+            tool_fields={t['function']['name']:list(t['function'].get('parameters',{}).get('properties',{})) for t in body.get('tools',[]) if t['function']['name'] in ['read','edit']}
+            observations[-1]['tool_fields']=tool_fields
+            if is_development:
+                session_scopes.add(self.headers.get('x-opencode-session'))
             step = sum(item['kind']=='development' for item in observations) if is_development else 0
             if not is_development:
                 name, arguments = None, None
             elif step == 1:
-                name, arguments = 'read', {'filePath':str(fixture)}
+                name, arguments = 'read', {('path' if 'path' in tool_fields.get('read',[]) else 'filePath'):str(fixture)}
             elif step == 2:
                 # Inspect decoded message strings only. Never print their content.
                 texts = []
@@ -60,7 +67,7 @@ class FakeModel(http.server.BaseHTTPRequestHandler):
                 if not match:
                     raise ValueError('masked configuration token not found')
                 token = match.group(1)
-                name, arguments = 'edit', {'filePath':str(fixture), 'oldString':f'DB_PASSWORD="{token}"', 'newString':f'DB_PASSWORD="{token}"\nFEATURE_ENABLED=true'}
+                name, arguments = 'edit', {('path' if 'path' in tool_fields.get('edit',[]) else 'filePath'):str(fixture), 'oldString':f'DB_PASSWORD="{token}"', 'newString':f'DB_PASSWORD="{token}"\nFEATURE_ENABLED=true'}
             else:
                 name, arguments = None, None
                 completed.set()
@@ -102,7 +109,7 @@ for path, value in [(client_key_file,client_key),(upstream_key_file,'dev-flow-up
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as target:
         target.write(value+'\n')
-env=dict(os.environ,GUARD_LISTEN=f'127.0.0.1:{port}',GUARD_REVERSIBLE='true',UPSTREAM_URL=f'http://127.0.0.1:{server.server_port}/v1/chat/completions',UPSTREAM_API_KEY_FILE=str(upstream_key_file),CLIENT_API_KEY_FILE=str(client_key_file))
+env=dict(os.environ,GUARD_DETECTOR=os.environ.get('GUARD_DETECTOR','credentials'),GUARD_LISTEN=f'127.0.0.1:{port}',GUARD_REVERSIBLE='true',UPSTREAM_URL=f'http://127.0.0.1:{server.server_port}/v1/chat/completions',UPSTREAM_API_KEY_FILE=str(upstream_key_file),CLIENT_API_KEY_FILE=str(client_key_file))
 env.pop('CLIENT_API_KEY',None)
 env.pop('UPSTREAM_API_KEY',None)
 log=(root/'guard.log').open('wb')
@@ -119,14 +126,19 @@ try:
             if guard.poll() is not None or time.monotonic()>deadline:
                 raise RuntimeError('guard startup failed')
             threading.Event().wait(0.05)
+    run_help=subprocess.run([opencode,'run','--help'],capture_output=True,text=True,timeout=15)
+    standalone=['--standalone'] if '--standalone' in run_help.stdout else []
+    provider_id='privacy-go' if standalone else 'opencode-go'
+    provider_model=provider_id+'/deepseek-v4.1-flash'
+    variant_args=[] if standalone else ['--variant','high']
     override = {
-        'enabled_providers': ['opencode-go'],
-        'model': 'opencode-go/deepseek-v4.1-flash',
+        'enabled_providers': [provider_id],
+        'model': provider_model,
         'agent': {
-            'build': {'model':'opencode-go/deepseek-v4.1-flash','variant':'high'},
-            'title': {'model':'opencode-go/deepseek-v4.1-flash'},
+            'build': {'model':provider_model,'variant':'high'},
+            'title': {'model':provider_model},
         },
-        'provider': {'opencode-go': {'options': {
+        'provider': {provider_id: {'npm':'@ai-sdk/openai-compatible','name':'Local credential guard','models': {'deepseek-v4.1-flash': {'name':'DeepSeek Flash local', 'reasoning':True,'limit':{'context':262144,'output':65536},'variants':{'high':{'reasoningEffort':'high'}}}},'options': {
             'baseURL':f'http://127.0.0.1:{port}/v1',
             'apiKey':'{file:'+str(client_key_file)+'}',
         }}},
@@ -136,8 +148,10 @@ try:
             'edit':{str(fixture):'allow',str(fixture).lstrip('/'):'allow'},
         },
     }
+    if not standalone:
+        override['provider'][provider_id]={'options':override['provider'][provider_id]['options']}
     cli_env=dict(os.environ,OPENCODE_CONFIG_CONTENT=json.dumps(override))
-    cli=subprocess.Popen([opencode,'run','--model','opencode-go/deepseek-v4.1-flash',f'Read {fixture} then add FEATURE_ENABLED=true without changing DB_PASSWORD. Use read and edit tools. Synthetic transport fixture: password="{prompt_secret}". Do not write this fixture value.'],cwd=root,env=cli_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+    cli=subprocess.Popen([opencode,'run',*standalone,'--model',(provider_model+'#high' if standalone else provider_model),*variant_args,f'Read {fixture} then add FEATURE_ENABLED=true without changing DB_PASSWORD. Use read and edit tools. Synthetic transport fixture: password="{prompt_secret}". Do not write this fixture value.'],cwd=root,env=cli_env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
     try:
         out,err=cli.communicate(timeout=90)
     except subprocess.TimeoutExpired:
@@ -146,7 +160,7 @@ try:
         out,err=cli.communicate()
     if cli.returncode != 0:
         failures.append('OpenCode CLI failed')
-    expected=f'DB_PASSWORD="{secret}"\nFEATURE_ENABLED=true\nPORT=8000\n'
+    expected=f'DB_PASSWORD="{secret}"\nFEATURE_ENABLED=true\nPORT=8000\n'+extra_config
     if fixture.read_text()!=expected:
         failures.append('edited file does not preserve exact original password and new setting')
     if not completed.is_set():
@@ -154,8 +168,10 @@ try:
     development = [x for x in observations if x['kind']=='development']
     if len(development)<3 or not all(x['model']=='deepseek-v4.1-flash' and x['reasoning']=='high' and x['session_header'] for x in development):
         failures.append('Go/high/session headers not preserved')
+    if len(session_scopes) != 1:
+        failures.append('OpenCode session scope changed between requests')
     log.flush()
-    if any(value in (root/'guard.log').read_text() for value in (secret, prompt_secret)):
+    if any(value in (root/'guard.log').read_text() for value in (secret, prompt_secret, *extra_credentials)):
         failures.append('guard log contains synthetic secret')
     diagnostic = (out + err).decode('utf-8', errors='replace').replace(secret, '<synthetic-secret>').replace(prompt_secret, '<synthetic-prompt-secret>')[:3000] if failures else ''
     print(json.dumps({'passed':not failures,'requests':len(observations),'observations':observations,'failures':failures,'fixture_directory':str(root),'cli_output_bytes':len(out)+len(err),'diagnostic':diagnostic},indent=2))

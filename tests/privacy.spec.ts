@@ -417,3 +417,27 @@ describe('route scope', () => {
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
 })
+
+
+describe('lightweight privacy streaming and stable scopes', () => {
+  it('emits ordinary text immediately even with mappings', () => {
+    const rewriter = new TokenRewriter(new Map([[TOKEN_A, mapping(TOKEN_A, 'secret')]]))
+    expect(rewriter.push('hello')).toBe('hello')
+    expect(rewriter.flush()).toBe('')
+  })
+
+  it('restores every possible split without withholding ordinary prefixes', () => {
+    for (let split = 0; split <= TOKEN_A.length; split++) {
+      const rewriter = new TokenRewriter(new Map([[TOKEN_A, mapping(TOKEN_A, 'secret')]]))
+      const result = rewriter.push('hello ' + TOKEN_A.slice(0, split))
+        + rewriter.push(TOKEN_A.slice(split) + ' world') + rewriter.flush()
+      expect(result).toBe('hello secret world')
+    }
+  })
+
+  it('recreates a session scope after restart and isolates client keys', () => {
+    const first = createScopeRegistry(8, 'client-key-a').acquire('session-a').scope
+    expect(createScopeRegistry(8, 'client-key-a').acquire('session-a').scope).toBe(first)
+    expect(createScopeRegistry(8, 'client-key-b').acquire('session-a').scope).not.toBe(first)
+  })
+})

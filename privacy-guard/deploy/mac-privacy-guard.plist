@@ -20,6 +20,8 @@
 
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>GUARD_DETECTOR</key>
+		<string>credentials</string>
 		<key>GUARD_LISTEN</key>
 		<string>127.0.0.1:8788</string>
 		<key>CLIENT_API_KEY_FILE</key>

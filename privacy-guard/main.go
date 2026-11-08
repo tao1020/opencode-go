@@ -37,6 +37,7 @@ const (
 // Config is the complete runtime configuration. Everything sensitive comes
 // from the environment; nothing is read from the client request.
 type Config struct {
+	Detector            string // "credentials" selects the lightweight profile; empty keeps the legacy detector.
 	ListenAddr          string
 	UpstreamURL         string
 	ClientAPIKey        string
@@ -106,6 +107,7 @@ func main() {
 
 func configFromEnv() (Config, error) {
 	cfg := Config{
+		Detector:            strings.TrimSpace(os.Getenv("GUARD_DETECTOR")),
 		ListenAddr:          envOr("GUARD_LISTEN", defaultListenAddr),
 		UpstreamURL:         os.Getenv("UPSTREAM_URL"),
 		ClientAPIKey:        os.Getenv("CLIENT_API_KEY"),

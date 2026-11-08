@@ -80,11 +80,24 @@ func NewGateway(cfg Config) (*Gateway, error) {
 		cfg.ResponseIdleTimeout = defaultResponseIdleTimeout
 	}
 
-	// Built once: construction is the only expensive step and the detector is
-	// safe to share for sequential scans (see gitleaksRedactor).
-	redactor, err := buildRedactor()
-	if err != nil {
-		return nil, err
+	// Build one detector per gateway. Credential mode shares a bounded position
+	// cache; the legacy detector serializes its library calls.
+	var redactor Redactor
+	switch cfg.Detector {
+	case "credentials":
+		redactor = &credentialRedactor{}
+	case "", "gitleaks":
+		var err error
+		redactor, err = buildRedactor()
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, errors.New("GUARD_DETECTOR must be credentials or gitleaks")
+	}
+	store := newMaskStore(maskMaxScopes, maskMaxMappings, maskScopeTTL)
+	if cfg.Detector == "credentials" {
+		store.tokenKey = []byte(cfg.ClientAPIKey)
 	}
 
 	transport := &http.Transport{
@@ -113,7 +126,7 @@ func NewGateway(cfg Config) (*Gateway, error) {
 		scanTimeout:    cfg.ScanTimeout,
 		requestTimeout: cfg.RequestTimeout,
 		responseIdle:   cfg.ResponseIdleTimeout,
-		maskStore:      newMaskStore(maskMaxScopes, maskMaxMappings, maskScopeTTL),
+		maskStore:      store,
 		reversible:     cfg.Reversible,
 		sem:            make(chan struct{}, cfg.MaxConcurrency),
 		client: &http.Client{

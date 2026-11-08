@@ -36,12 +36,12 @@ export interface MaskState {
 /** Create the per-call mask state; mappings publish once, before the first chunk. */
 export declare function createMaskState(): MaskState;
 /**
- * Session-scoped opaque namespaces. The scope is random, never the raw session
- * id, and exists only in this process. A bounded LRU pins active scopes so one
+ * Session-scoped opaque namespaces, derived from the client key and session ID.
+ * Recreating the registry with the same key preserves named scopes. A bounded LRU pins active scopes so one
  * is never replaced underneath a call; at capacity with every scope active it
  * refuses instead of silently re-keying.
  */
-export declare function createScopeRegistry(maxScopes?: number): {
+export declare function createScopeRegistry(maxScopes?: number, secret?: string | Buffer): {
     acquire(sessionId: string): {
         readonly scope: string;
         release(): void;
@@ -53,9 +53,8 @@ export declare function createScopeRegistry(maxScopes?: number): {
  * It never rescans text it emitted.
  */
 export declare class TokenRewriter {
+    private readonly mappings;
     private buffer;
-    private readonly entries;
-    private readonly maxTokenLength;
     constructor(mappings: ReadonlyMap<string, PrivacyMapping>);
     push(text: string): string;
     flush(): string;
