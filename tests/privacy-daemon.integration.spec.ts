@@ -147,16 +147,20 @@ describeIntegration('privacy daemon integration (manual)', () => {
     await collect(adapter.stream({ ...options, sessionId: 'session-b' as never }))
     expect(TOKEN.exec(JSON.stringify(gateway.bodies[2]))?.[0]).not.toBe(token)
 
-    // Simulate history from a previous plugin process. The new adapter has a
-    // fresh scope and must return the old literal exactly once to the tool.
+    // A restarted client preserves this session, while imported history in a
+    // different session restores the token literal without crossing scopes.
     const stale = token as string
     const restarted = new OpencodeGoAdapter({
       config: () => configOf(gateway.url, { privacyEnabled: true }),
       resolveApiKey: () => Promise.resolve('test-key'),
       privacy: createHttpPrivacyClient({ endpoint, apiKeyFile: join(dir, 'client-key'), timeoutMs: 15_000 }),
     })
+    gateway.pushCompletions({ events: textEvents })
+    await collect(restarted.stream(options))
+    expect(TOKEN.exec(JSON.stringify(gateway.bodies.at(-1)))?.[0]).toBe(stale)
     const replay = {
       ...options,
+      sessionId: 'another-history-session' as never,
       messages: [createUserMessage({ content: [{ type: 'text', text: `historical ${stale}` }], source: { kind: 'plugin', plugin: 'test' } })],
     }
     gateway.pushCompletions({ events: textEvents })

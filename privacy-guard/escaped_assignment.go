@@ -28,6 +28,10 @@ var maskEscapedAuthRE = regexp.MustCompile(`(?i)(?:\b|\\[nrt])(?:proxy-)?authori
 // escapedContextSpans finds values inside JSON-escaped quotes without decoding
 // or reserializing their surrounding source. All offsets refer to original bytes.
 func escapedContextSpans(text string) []textSpan {
+	return credentialContextSpans(text, false)
+}
+
+func credentialContextSpans(text string, credentials bool) []textSpan {
 	if !strings.Contains(text, `\"`) {
 		return nil
 	}
@@ -36,6 +40,15 @@ func escapedContextSpans(text string) []textSpan {
 		re    *regexp.Regexp
 		group int
 	}{{maskAssignRE, 1}, {maskProseENRE, 1}, {maskProseZHRE, 1}, {maskRefDefaultRE, 1}, {maskEscapedAuthRE, 2}}
+	if credentials {
+		rules = append(rules, struct {
+			re    *regexp.Regexp
+			group int
+		}{credentialExtraAssignRE, 1}, struct {
+			re    *regexp.Regexp
+			group int
+		}{credentialUserZHRE, 1})
+	}
 	for _, rule := range rules {
 		for _, match := range rule.re.FindAllStringSubmatchIndex(text, -1) {
 			start := match[rule.group*2]
@@ -93,7 +106,7 @@ func escapedContextSpans(text string) []textSpan {
 func (m *masker) discoverEscaped(text string, found map[string]struct{}) error {
 	candidates := make(map[string]struct{})
 	var batch strings.Builder
-	for _, span := range escapedContextSpans(text) {
+	for _, span := range credentialContextSpans(text, m.credentials) {
 		value := text[span.start:span.end]
 		if len(value) < maskMinPropagate || isExactReference(value) || m.containsKnownToken(value) || isPropagationPlaceholder(value) {
 			continue
@@ -140,7 +153,7 @@ func (m *masker) discoverEscaped(text string, found map[string]struct{}) error {
 }
 
 func (m *masker) maskEscapedAssignments(text string) (string, error) {
-	spans := escapedContextSpans(text)
+	spans := credentialContextSpans(text, m.credentials)
 	for i := len(spans) - 1; i >= 0; i-- {
 		span := spans[i]
 		value := text[span.start:span.end]

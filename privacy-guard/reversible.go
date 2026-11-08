@@ -13,7 +13,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -109,6 +111,9 @@ type textSpan struct {
 }
 
 func referenceSpans(text string) []textSpan {
+	if !strings.Contains(text, "os.") && !strings.Contains(text, "process.env") && !strings.Contains(text, "$") {
+		return nil
+	}
 	var spans []textSpan
 	for _, re := range maskReferenceREs {
 		for _, match := range re.FindAllStringIndex(text, -1) {
@@ -129,6 +134,9 @@ func withinReference(spans []textSpan, start, end int) bool {
 
 // isExactReference reports whether the whole value is one well-formed reference.
 func isExactReference(value string) bool {
+	if !strings.Contains(value, "os.") && !strings.Contains(value, "process.env") && !strings.Contains(value, "$") {
+		return false
+	}
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return false
@@ -290,6 +298,7 @@ type maskVault struct {
 
 // maskStore owns every vault and the memory budget.
 type maskStore struct {
+	tokenKey       []byte
 	mu             sync.Mutex
 	scopes         map[string]*maskVault
 	maxScopes      int
@@ -381,13 +390,23 @@ func (s *maskStore) tokenFor(scope string, vault *maskVault, key vaultKey) (stri
 
 	for attempt := 0; attempt < 8; attempt++ {
 		raw := make([]byte, maskTokenBytes)
-		if _, err := rand.Read(raw); err != nil {
+		if len(s.tokenKey) > 0 {
+			mac := hmac.New(sha256.New, s.tokenKey)
+			encoded, _ := json.Marshal([]string{"privacy-guard-token-v1", scope, key.kind, key.value})
+			mac.Write(encoded)
+			copy(raw, mac.Sum(nil))
+		} else if _, err := rand.Read(raw); err != nil {
 			return "", errMaskCapacity
 		}
 		token := maskTokenPrefix + hex.EncodeToString(raw) + "__"
 		if _, taken := vault.byToken[token]; taken {
+			if len(s.tokenKey) > 0 {
+				return "", errMaskCapacity
+			}
 			continue
 		}
+		// Retain only the credential bytes, not the entire request backing string.
+		key.value = strings.Clone(key.value)
 		vault.byOriginal[key] = token
 		vault.byToken[token] = vaultEntry{original: key.value, originalType: key.kind}
 		vault.usedBytes += cost
@@ -411,11 +430,12 @@ func (s *maskStore) lookup(vault *maskVault, token string) (vaultEntry, bool) {
 
 // masker masks one payload and records the mappings it emitted.
 type masker struct {
-	ctx      context.Context
-	scope    string
-	store    *maskStore
-	vault    *maskVault
-	detector Redactor
+	credentials bool
+	ctx         context.Context
+	scope       string
+	store       *maskStore
+	vault       *maskVault
+	detector    Redactor
 
 	tokens    map[vaultKey]string
 	minted    map[string]struct{}
@@ -503,6 +523,9 @@ func (m *masker) collectDiscovered(long map[string]struct{}, value string) {
 var passiveStatusRE = regexp.MustCompile(`(?i)\b(password|passwd|passphrase|passcode|secret|api[ _-]?key|access token|token)\s+(?:is|was|are|were)\s+left\s+(?:untouched|unchanged|unmodified)\b`)
 
 func scrubStatusProse(text string) string {
+	if !strings.Contains(strings.ToLower(text), "left") {
+		return text
+	}
 	matches := passiveStatusRE.FindAllStringSubmatchIndex(text, -1)
 	if len(matches) == 0 {
 		return text
@@ -651,6 +674,7 @@ func (g *Gateway) maskPayload(ctx context.Context, body []byte) (maskResponse, e
 	}
 
 	worker := &masker{
+		credentials:  credentialsEnabled(g.redactor),
 		ctx:          ctx,
 		scope:        scope,
 		store:        g.maskStore,
@@ -770,9 +794,9 @@ func (m *masker) walkObject(object map[string]any, p path, inheritedSensitive bo
 		}
 
 		structural := maskStructuralKey(p, key)
-		sensitive := inheritedSensitive || sensitiveKeyRE.MatchString(key)
+		sensitive := inheritedSensitive || m.sensitiveKey(key)
 		_, literalKey := schemaValueKeys[lower]
-		forceSensitive := sensitiveKeyRE.MatchString(key) || (inheritedSensitive && literalKey)
+		forceSensitive := m.sensitiveKey(key) || (inheritedSensitive && literalKey)
 
 		switch typed := value.(type) {
 		case string:
@@ -842,8 +866,11 @@ func maskStructuralKey(p path, key string) bool {
 	if p.inSchemaPath() {
 		return false
 	}
-	if key == "model" && len(p) == 0 {
-		return true
+	if len(p) == 0 {
+		switch key {
+		case "model", "reasoning_effort", "service_tier":
+			return true
+		}
 	}
 	if key == "name" && (p.contains("tools") || p.contains("functions")) {
 		return true
@@ -919,6 +946,9 @@ func (m *masker) maskArguments(value string, p path) (string, error) {
 // maskPlain masks credential assignments at their exact span, then replaces
 // request-wide string values of four or more characters.
 func (m *masker) maskPlain(value string) (string, error) {
+	if m.credentials {
+		return m.maskCredentialText(value)
+	}
 	masked, err := m.maskEscapedAssignments(value)
 	if err != nil {
 		return "", err
@@ -1059,7 +1089,7 @@ func (m *masker) discover(node any, p path, inheritedSensitive bool) (map[string
 					continue
 				}
 			}
-			sensitive := inheritedSensitive || sensitiveKeyRE.MatchString(key)
+			sensitive := inheritedSensitive || m.sensitiveKey(key)
 			nested, err := m.discover(value, p.push(key), sensitive)
 			if err != nil {
 				return nil, err
@@ -1081,6 +1111,11 @@ func (m *masker) discover(node any, p path, inheritedSensitive bool) (map[string
 	case string:
 		if typed == "" {
 			return found, nil
+		}
+		if m.credentials && bareCredentialText(p) {
+			for _, value := range bareCredentials(typed) {
+				m.collectDiscovered(found, value)
+			}
 		}
 		// Tool arguments carry a nested document: discover inside it too.
 		if isToolArgumentsKey(p) {
@@ -1119,7 +1154,12 @@ func sortedValues(values map[string]struct{}) []string {
 	for value := range values {
 		out = append(out, value)
 	}
-	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	sort.Slice(out, func(i, j int) bool {
+		if len(out[i]) == len(out[j]) {
+			return out[i] < out[j]
+		}
+		return len(out[i]) > len(out[j])
+	})
 	return out
 }
 

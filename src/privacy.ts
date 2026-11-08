@@ -12,7 +12,7 @@
  * @module llm-opencode-go/privacy
  */
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { LlmError, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -28,6 +28,7 @@ export const PRIVACY_CONTRACT_VERSION = 1
 /** Request and response envelope cap, including the JSON wrapper. */
 const MAX_TRANSPORT_BYTES = 8 * 1024 * 1024
 
+const TOKEN_LENGTH = 39
 const TOKEN_PATTERN = /^__PG_[0-9a-f]{32}__$/
 const NUMBER_LITERAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
 const TOKEN_SCAN = /__PG_[0-9a-f]{32}__/g
@@ -117,12 +118,12 @@ export function createMaskState(): MaskState {
 }
 
 /**
- * Session-scoped opaque namespaces. The scope is random, never the raw session
- * id, and exists only in this process. A bounded LRU pins active scopes so one
+ * Session-scoped opaque namespaces, derived from the client key and session ID.
+ * Recreating the registry with the same key preserves named scopes. A bounded LRU pins active scopes so one
  * is never replaced underneath a call; at capacity with every scope active it
  * refuses instead of silently re-keying.
  */
-export function createScopeRegistry(maxScopes = MAX_SCOPES): { acquire(sessionId: string): { readonly scope: string; release(): void } } {
+export function createScopeRegistry(maxScopes = MAX_SCOPES, secret: string | Buffer = randomBytes(32)): { acquire(sessionId: string): { readonly scope: string; release(): void } } {
   const entries = new Map<string, { scope: string; active: number }>()
   return {
     acquire(sessionId) {
@@ -137,7 +138,7 @@ export function createScopeRegistry(maxScopes = MAX_SCOPES): { acquire(sessionId
           if (victim === undefined) fail('PRIVACY_SCOPE_CAPACITY')
           entries.delete(victim[0])
         }
-        entry = { scope: randomBytes(16).toString('hex'), active: 0 }
+        entry = { scope: createHmac('sha256', secret).update('privacy-guard-scope-v1\0').update(sessionId).digest('hex').slice(0, 32), active: 0 }
         entries.set(sessionId, entry)
       }
       entry.active += 1
@@ -162,37 +163,34 @@ export function createScopeRegistry(maxScopes = MAX_SCOPES): { acquire(sessionId
  */
 export class TokenRewriter {
   private buffer = ''
-  private readonly entries: ReadonlyArray<readonly [string, PrivacyMapping]>
-  private readonly maxTokenLength: number
 
-  constructor(mappings: ReadonlyMap<string, PrivacyMapping>) {
-    this.entries = [...mappings.entries()].sort((left, right) => right[0].length - left[0].length)
-    this.maxTokenLength = this.entries.reduce((max, [token]) => Math.max(max, token.length), 0)
-  }
+  constructor(private readonly mappings: ReadonlyMap<string, PrivacyMapping>) {}
 
   push(text: string): string {
-    if (this.entries.length === 0) return text
+    if (this.mappings.size === 0) return text
     this.buffer += text
     let out = ''
-    for (;;) {
-      let bestIndex = -1
-      let best: PrivacyMapping | undefined
-      for (const [token, mapping] of this.entries) {
-        const index = this.buffer.indexOf(token)
-        if (index < 0) continue
-        if (bestIndex < 0 || index < bestIndex || (index === bestIndex && token.length > (best?.token.length ?? 0))) {
-          bestIndex = index
-          best = mapping
-        }
+    const prefix = '__PG_'
+    while (this.buffer.length > 0) {
+      const start = this.buffer.indexOf(prefix)
+      if (start < 0) {
+        let keep = Math.min(prefix.length - 1, this.buffer.length)
+        while (keep > 0 && !prefix.startsWith(this.buffer.slice(-keep))) keep--
+        out += this.buffer.slice(0, this.buffer.length - keep)
+        this.buffer = this.buffer.slice(this.buffer.length - keep)
+        break
       }
-      if (best === undefined) break
-      out += this.buffer.slice(0, bestIndex) + best.original
-      this.buffer = this.buffer.slice(bestIndex + best.token.length)
-    }
-    const keep = Math.max(0, this.maxTokenLength - 1)
-    if (this.buffer.length > keep) {
-      out += this.buffer.slice(0, this.buffer.length - keep)
-      this.buffer = this.buffer.slice(this.buffer.length - keep)
+      out += this.buffer.slice(0, start)
+      this.buffer = this.buffer.slice(start)
+      if (this.buffer.length < TOKEN_LENGTH && /^__PG_(?:[0-9a-f]{0,32}|[0-9a-f]{32}_)$/.test(this.buffer)) break
+      const token = this.buffer.slice(0, TOKEN_LENGTH)
+      if (TOKEN_PATTERN.test(token)) {
+        out += this.mappings.get(token)?.original ?? token
+        this.buffer = this.buffer.slice(TOKEN_LENGTH)
+      } else {
+        out += this.buffer[0]
+        this.buffer = this.buffer.slice(1)
+      }
     }
     return out
   }
@@ -210,26 +208,8 @@ export class TokenRewriter {
  * the original itself contains; this scanner never looks at text it emits.
  */
 function restoreText(text: string, mappings: ReadonlyMap<string, PrivacyMapping>): string {
-  if (mappings.size === 0) return text
-  const tokens = [...mappings.keys()].sort((left, right) => right.length - left.length)
-  let out = ''
-  let index = 0
-  while (index < text.length) {
-    let matched = false
-    if (text.startsWith('__PG_', index)) {
-      for (const token of tokens) {
-        if (!text.startsWith(token, index)) continue
-        out += mappings.get(token)!.original
-        index += token.length
-        matched = true
-        break
-      }
-    }
-    if (matched) continue
-    out += text[index]
-    index += 1
-  }
-  return out
+  const rewriter = new TokenRewriter(mappings)
+  return rewriter.push(text) + rewriter.flush()
 }
 
 /**
@@ -573,7 +553,7 @@ export function createHttpPrivacyClient(config: PrivacyClientConfig): PrivacyMas
   const endpoint = assertPrivacyEndpoint(config.endpoint)
   const apiKey = readPrivacyKey(config.apiKeyFile)
   if (!Number.isSafeInteger(config.timeoutMs) || config.timeoutMs < 1000 || config.timeoutMs > 60_000) fail('PRIVACY_CONFIG')
-  const scopes = createScopeRegistry()
+  const scopes = createScopeRegistry(MAX_SCOPES, apiKey)
 
   return {
     async mask(payload, meta, signal) {

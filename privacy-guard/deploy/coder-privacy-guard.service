@@ -26,6 +26,7 @@ Environment=UPSTREAM_URL=https://opencode.ai/inference/go/openai/v1/chat/complet
 # Mandatory on Coder. Without it the proxy forwards one-way masked text and the
 # client can never restore the original value.
 Environment=GUARD_REVERSIBLE=true
+Environment=GUARD_DETECTOR=credentials
 
 Environment=GUARD_REQUEST_TIMEOUT=10m
 Environment=GUARD_RESPONSE_IDLE_TIMEOUT=2m
