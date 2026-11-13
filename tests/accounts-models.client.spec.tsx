@@ -412,6 +412,20 @@ describe("account cards, quota rows and ordering", () => {
     fixture.controller.dispose()
   })
 
+  it('turns on request balancing from the accounts card and reports the stored flag', async () => {
+    const fixture = setup()
+    render(<AccountsCard state={fixture.controller.accountState()} actions={fixture.actions} writable t={t} />)
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(en.accountsTitle) }))
+    const toggle = screen.getByRole('switch', { name: en.accountBalance })
+    expect(toggle.getAttribute('title')).toBe(en.accountBalanceHint)
+    expect(fixture.controller.accountState().balanceAccounts).toBe(false)
+    await act(async () => { fireEvent.click(toggle) })
+    expect(fixture.execute).toHaveBeenCalledWith({ kind: 'balance', value: true })
+    expect(fixture.server.value().balanceAccounts).toBe(true)
+    expect(fixture.controller.accountState().balanceAccounts).toBe(true)
+    fixture.controller.dispose()
+  })
+
   it('ships folded, and keeps every account row detail closed until its disclosure opens', async () => {
     const fixture = setup()
     await fixture.controller.refreshAccounts()
@@ -425,7 +439,8 @@ describe("account cards, quota rows and ordering", () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByRole('button', { name: en.accountAdd })).toBeTruthy()
     // The automatic-fallback switch lives inside the fold, unlike the model switches.
-    expect(screen.getByRole('switch')).toBeTruthy()
+    expect(screen.getByRole('switch', { name: en.accountAutoSwitch })).toBeTruthy()
+    expect(screen.getByRole('switch', { name: en.accountBalance })).toBeTruthy()
     // Rows carry the key state and the rolling reading; the rest is behind each row's disclosure.
     expect(screen.getAllByText(en.keyConfigured)).toHaveLength(2)
     expect(screen.queryByText(new RegExp(en.usage_weekly))).toBeNull()

@@ -98,6 +98,8 @@ export interface AccountSettings {
   /** Omission/null preserves legacy credentials; an explicit empty list removes all accounts. */
   accounts?: readonly GoAccount[] | null
   autoSwitch?: boolean
+  /** Start each request on the next saved account, spending every subscription at once. */
+  balanceAccounts?: boolean
 }
 
 export function accountRefOf(settings: AccountSettings): string {
@@ -108,6 +110,12 @@ export function accountRefOf(settings: AccountSettings): string {
 export function moveAccountFirst(accounts: readonly GoAccount[], ref: string): readonly GoAccount[] {
   const index = accounts.findIndex(account => account.apiKeyEnv === ref)
   return index <= 0 ? accounts : [accounts[index]!, ...accounts.slice(0, index), ...accounts.slice(index + 1)]
+}
+
+/** Rotate a saved order so the request after `cursor` requests starts on a later account. */
+export function rotateAccountRefs(refs: readonly string[], cursor: number): readonly string[] {
+  const start = refs.length === 0 ? 0 : cursor % refs.length
+  return start === 0 ? refs : [...refs.slice(start), ...refs.slice(0, start)]
 }
 
 /** Read legacy selections as the first account until the host persists their order. */
@@ -215,6 +223,8 @@ export interface OpencodeGoConfig {
   accounts?: GoAccount[] | null
   /** Try other saved accounts on quota/credential rejection before any content is emitted. */
   autoSwitch?: boolean
+  /** Start each request on the next saved account; the saved order stays unchanged. */
+  balanceAccounts?: boolean
   /** Discovery/usage base; the official Go gateway selects inference endpoints by protocol. */
   baseURL: string
   /** Platform discovery base; only explicitly free chat models are served. */
@@ -526,6 +536,7 @@ export type AccountCommand =
   | { kind: 'replace-key'; ref: string; key: string }
   | { kind: 'move'; ref: string; toIndex: number }
   | { kind: 'auto-switch'; value: boolean }
+  | { kind: 'balance'; value: boolean }
 
 export function parseAccountCommand(value: unknown): AccountCommand {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid account command')
@@ -533,7 +544,7 @@ export function parseAccountCommand(value: unknown): AccountCommand {
   const fields: Record<string, string[]> = {
     add: ['kind', 'id', 'name', 'key'], remove: ['kind', 'ref'], select: ['kind', 'ref'],
     rename: ['kind', 'ref', 'name'], 'replace-key': ['kind', 'ref', 'key'],
-    move: ['kind', 'ref', 'toIndex'], 'auto-switch': ['kind', 'value'],
+    move: ['kind', 'ref', 'toIndex'], 'auto-switch': ['kind', 'value'], balance: ['kind', 'value'],
   }
   if (typeof row.kind !== 'string' || !Object.hasOwn(fields, row.kind)
     || Object.keys(row).some(key => !fields[row.kind as string]!.includes(key))
@@ -544,6 +555,7 @@ export function parseAccountCommand(value: unknown): AccountCommand {
   if (row.kind === 'add' && (typeof row.id !== 'string' || !/^[a-f0-9]{32}$/.test(row.id))) throw new Error('Invalid account operation ID')
   if (row.kind === 'move' && (!Number.isInteger(row.toIndex) || (row.toIndex as number) < 0)) throw new Error('Invalid account position')
   if (row.kind === 'auto-switch' && typeof row.value !== 'boolean') throw new Error('Invalid account switch')
+  if (row.kind === 'balance' && typeof row.value !== 'boolean') throw new Error('Invalid account balancing')
   return { ...row } as AccountCommand
 }
 

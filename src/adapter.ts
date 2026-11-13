@@ -4,6 +4,7 @@ import {
   isModelEnabled,
   accountsOf,
   accountRefOf,
+  rotateAccountRefs,
   type GoAccountSwitch,
   type ModelSource,
   FREE_PROVIDER_ID,
@@ -578,6 +579,9 @@ export class OpencodeGoAdapter extends LlmAdapter {
   private readonly credentialVersions = new Map<string, number>()
   private credentialEpoch = 0
 
+  /** Balances consecutive requests across the saved accounts, one turn each. */
+  private accountCursor = 0
+
   /** Monotonic sequence of the latest request this adapter started. */
   private callSeq = 0
 
@@ -778,8 +782,14 @@ export class OpencodeGoAdapter extends LlmAdapter {
     // The preferred reference resolves through accountRefOf: an empty string
     // keeps the default reference's semantics rather than naming no account.
     const preferred = accountRefOf(snapshot.config)
-    const ordered = this.source === 'free' ? accounts.map(account => account.apiKeyEnv)
-      : snapshot.config.autoSwitch ? [...new Set([preferred, ...accounts.map(account => account.apiKeyEnv)])] : [preferred]
+    const refs = accounts.map(account => account.apiKeyEnv)
+    // Balancing turns the starting account per request, so several subscriptions
+    // are spent at once. It only reorders this dispatch: the saved order and the
+    // current account it names are never rewritten.
+    const balanced = this.source === 'go' && snapshot.config.balanceAccounts === true && refs.length > 1
+    const base = this.source === 'free' ? refs
+      : balanced ? refs
+      : snapshot.config.autoSwitch ? [...new Set([preferred, ...refs])] : [preferred]
     // Keys the gateway rejected lately are skipped for a bounded window:
     // re-sending a full transcript to a rejected key is pure waste. If every
     // candidate is in that window the original order stands, so the gateway's
@@ -790,11 +800,19 @@ export class OpencodeGoAdapter extends LlmAdapter {
     // Expired rejections are pruned before every attempt, so the map stays
     // bounded by recently rejected references instead of growing with history.
     this.pruneRejectedKeys(now)
-    const usable = ordered.filter(ref => {
+    const usable = base.filter(ref => {
       const until = this.rejectedKeys.get(ref)?.get(gateway)
       return until === undefined || now >= until
     })
-    const candidates = this.accountCandidates(snapshot.config, ordered, usable, options.signal)
+    // A balanced dispatch starts on the next account in the rotation; without
+    // autoSwitch it still only tries that one. A rejected key stays out of the
+    // rotation until its window lapses.
+    const ordered = balanced ? rotateAccountRefs(usable.length > 0 ? usable : base, this.accountCursor++) : base
+    // A balanced request is not a fallback: the account it starts on is the
+    // preferred one for this dispatch, so only a real failover reports a switch.
+    const startRef = balanced ? ordered[0]! : preferred
+    const dispatchUsable = balanced ? ordered.filter(ref => usable.includes(ref)) : usable
+    const candidates = this.accountCandidates(snapshot.config, ordered, dispatchUsable, options.signal)
     let candidate = await candidates.next()
     if (candidate.done) {
       if (this.source === 'free') yield* streamPublic()
@@ -831,8 +849,8 @@ export class OpencodeGoAdapter extends LlmAdapter {
       const announce = (): void => {
         if (emitted) return
         const serving = ref
-        const replaced = failedRef ?? skippedRef ?? preferred
-        const notice: GoAccountSwitch | undefined = serving === preferred ? undefined : {
+        const replaced = failedRef ?? skippedRef ?? startRef
+        const notice: GoAccountSwitch | undefined = serving === startRef ? undefined : {
           // The notice names the account the journey left: the first one that
           // failed this request, else the first one skipped for a remembered
           // rejection.
@@ -876,9 +894,10 @@ export class OpencodeGoAdapter extends LlmAdapter {
   /** Resolve Free keys only when selecting an account or retrying a failed attempt. */
   private async *accountCandidates(config: OpencodeGoConfig, ordered: readonly string[], usable: readonly string[], signal?: AbortSignal): AsyncGenerator<AccountCandidate> {
     if (this.source === 'go') {
-      const refs = usable.length > 0 ? usable : ordered
-      const skippedRef = ordered.find(ref => !refs.includes(ref))
-      for (const ref of refs) yield { ref, skippedRef, credentialVersion: this.credentialVersions.get(ref) ?? 0 }
+      const refs = ordered.filter(ref => usable.includes(ref))
+      const candidates = refs.length > 0 ? refs : ordered
+      const skippedRef = ordered.find(ref => !candidates.includes(ref))
+      for (const ref of candidates) yield { ref, skippedRef, credentialVersion: this.credentialVersions.get(ref) ?? 0 }
       return
     }
     const groups = config.autoSwitch ? [usable, ordered.filter(ref => !usable.includes(ref))] : [ordered]

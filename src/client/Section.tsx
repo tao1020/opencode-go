@@ -403,6 +403,12 @@ export function AccountsCard({ state, actions, writable, t, locale }: {
               title={t('accountAutoSwitchHint')}
               onChange={next => { void actions.setAutoSwitch(next) }} /></div>
         </div>
+        <div className={css.field}>
+          <div className={css.head}><span className={css.label}>{t('accountBalance')}<HintMark hint={t('accountBalanceHint')} /></span>
+            <Switch checked={state.balanceAccounts} disabled={disabled} label={t('accountBalance')}
+              title={t('accountBalanceHint')}
+              onChange={next => { void actions.setBalanceAccounts(next) }} /></div>
+        </div>
       </div>
     </div> : null}
   </section>
@@ -945,7 +951,8 @@ export function OpencodeGoSection(props: OpencodeGoSectionProps) {
     || save === undefined || discard === undefined || loadModels === undefined
     || setEnabled === undefined || setModelEnabled === undefined || props.editModelLimits === undefined || t === undefined
     || !props.loadAccounts || !props.addAccount || !props.renameAccount || !props.removeAccount
-    || !props.selectAccount || !props.setAutoSwitch || !props.replaceAccountKey || !props.moveAccount) return null
+    || !props.selectAccount || !props.setAutoSwitch || !props.setBalanceAccounts
+    || !props.replaceAccountKey || !props.moveAccount) return null
   return (
     <Loaded
       state={useOpencodeGo(snapshot => snapshot)}
@@ -962,7 +969,8 @@ export function OpencodeGoSection(props: OpencodeGoSectionProps) {
       accountActions={{
         loadAccounts: props.loadAccounts, addAccount: props.addAccount, renameAccount: props.renameAccount,
         resetAddition: props.resetAddition, removeAccount: props.removeAccount, selectAccount: props.selectAccount,
-        setAutoSwitch: props.setAutoSwitch, replaceAccountKey: props.replaceAccountKey, moveAccount: props.moveAccount,
+        setAutoSwitch: props.setAutoSwitch, setBalanceAccounts: props.setBalanceAccounts,
+        replaceAccountKey: props.replaceAccountKey, moveAccount: props.moveAccount,
       }}
     />
   )

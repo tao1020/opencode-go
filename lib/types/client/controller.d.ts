@@ -90,6 +90,7 @@ export interface GoAccountsState {
     entries: readonly GoAccountView[];
     activeRef: string;
     autoSwitch: boolean;
+    balanceAccounts: boolean;
     busy: boolean;
     blocked: boolean;
     refreshing: boolean;
@@ -104,6 +105,7 @@ export interface GoAccountsActions {
     removeAccount: (ref: string) => Promise<boolean>;
     selectAccount: (ref: string) => Promise<boolean>;
     setAutoSwitch: (next: boolean) => Promise<boolean>;
+    setBalanceAccounts: (next: boolean) => Promise<boolean>;
     replaceAccountKey: (ref: string, key: string) => Promise<boolean>;
     /** Move one account to a new position; the first row becomes the preferred account. */
     moveAccount: (ref: string, toIndex: number) => Promise<boolean>;

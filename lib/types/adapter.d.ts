@@ -175,6 +175,8 @@ export declare class OpencodeGoAdapter extends LlmAdapter {
      */
     private readonly credentialVersions;
     private credentialEpoch;
+    /** Balances consecutive requests across the saved accounts, one turn each. */
+    private accountCursor;
     /** Monotonic sequence of the latest request this adapter started. */
     private callSeq;
     private nextCallSequence;

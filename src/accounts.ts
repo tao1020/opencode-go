@@ -146,6 +146,7 @@ export class GoAccountManager {
     const { credentials } = connection
     let value = this.read(connection).value
     if (command.kind === 'auto-switch') return this.write(connection, { autoSwitch: command.value })
+    if (command.kind === 'balance') return this.write(connection, { balanceAccounts: command.value })
     if (command.kind === 'add') {
       const ref = ACCOUNT_REF_PREFIX + command.id.toUpperCase()
       if (value.accounts?.some(account => account.id === command.id && account.apiKeyEnv === ref)) return 'applied'

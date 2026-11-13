@@ -62,6 +62,7 @@ const fields = {
     apiKeyEnv: z.string().role('credential-ref').pattern(ACCOUNT_REF_PATTERN).required(),
   })).max(MAX_ACCOUNTS)]).default(null),
   autoSwitch: z.boolean().default(false),
+  balanceAccounts: z.boolean().default(false),
   // Settings rebuild and serialize this schema before sending it to clients.
   // Keep it data-only: a rehydrated transform loses its callback on forwarding.
   baseURL: z.string().default(DEFAULT_BASE_URL),

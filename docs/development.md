@@ -27,7 +27,7 @@ Vitest tests are organized by domain. Results for the history-dashboard migratio
 | Test file | Coverage |
 | --- | --- |
 | `plugin.spec.ts` | Cordis mounting/unloading, native SettingsForms/profile writes, hot configuration, RPC and public exports |
-| `accounts.spec.ts` | Account CRUD, 20-account cap, serial writes, failed-write cleanup, fallback/promotion, stale calls and five-minute cooldown |
+| `accounts.spec.ts` | Account CRUD, 20-account cap, serial writes, failed-write cleanup, fallback/promotion, round-robin balancing, stale calls and five-minute cooldown |
 | `free.spec.ts` | Dual route lifecycle, public Bearer fallback, official-HTTPS-only saved-key binding, account retry and credential deadlines |
 | `free-channel.spec.ts`, `free-transport.spec.ts` | Free failure classification, Retry-After/backoff, cancellation, transport isolation, stream-budget-derived SOCKS relay idle limits and coexistence with Go |
 | `pricing.spec.ts` | Catalog tariff validation and Free-model eligibility; historical amounts come from official CSV |

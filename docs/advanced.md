@@ -78,6 +78,8 @@ Bun 1.4.4 通过插件直接声明的 `@oven/bun-<platform>` npm 可选平台包
     autoSwitch: true
     # Free 默认关闭；需要平台免费模型时显式开启（等同于 高级设置 → 免费通道）
     freeEnabled: true
+    # 多账号轮询：每个请求依次从下一个账号开始，两份订阅同时消耗额度
+    balanceAccounts: true
     freeBaseURL: https://opencode.ai/inference/v1
     proxyURL: http://127.0.0.1:7890
     refreshMinutes: 60
@@ -95,6 +97,8 @@ Bun 1.4.4 通过插件直接声明的 `@oven/bun-<platform>` npm 可选平台包
 
 按需保留配置项，并通过 DSH 凭据服务或环境变量提供对应的 Key。`accounts` 的首项为当前账号，其余账号按顺序备用；`apiKeyEnv` 保留为兼容引用，应与首项一致。手动或自动切换都会将目标账号移至首位，保持其他账号的相对顺序。旧配置中当前账号不在首位时，会保留原来的选择并将它前移。
 
+`balanceAccounts` 打开多账号轮询：每个请求依次从列表中的下一个账号开始，几份订阅的额度同时消耗。它只改变请求的起点，不写回列表顺序和当前账号；账号少于两个时保持原顺序。轮询与 `autoSwitch` 相互独立——希望某个账号额度耗尽后请求继续时，请同时开启 `autoSwitch`。Free 路由不使用该设置。
+
 | 配置项 | 用途 |
 | --- | --- |
 | `baseURL` | OpenCode Go 网关地址，默认 `https://opencode.ai/inference/go/v1`；官方网关自动按模型协议选择推理端点 |
@@ -107,6 +111,7 @@ Bun 1.4.4 通过插件直接声明的 `@oven/bun-<platform>` npm 可选平台包
 | `modelLimits` | 按模型覆盖 `contextWindow`、`maxTokens`，或用 `thinkingBudgets` 添加思考预算选项；空值使用默认设置 |
 | `maxImages` | 单次请求历史中的图片数量上限，默认不设上限；超过时先卸载最旧图片 |
 | `streamIdleTimeoutMs` | 等待下一个流事件的最长时间，默认 300000 毫秒 |
+| `balanceAccounts` | 多账号轮询：每个请求从下一个账号开始，几份订阅同时消耗额度；默认 `false`，需配合 `autoSwitch` 才能续到其他账号 |
 | `requestPreparationTimeoutMs` | 目录查询及每次尝试的凭据、图片准备时限，默认 60000 毫秒 |
 | `requestTimeoutMs` | 一次发送的完整时限，包含目录查询、账号切换和流式输出，默认 1800000 毫秒；预先准备的调用从发送时计时 |
 
