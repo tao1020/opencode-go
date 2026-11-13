@@ -1,6 +1,6 @@
 {
   "name": "dsh-opencode-go",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "OpenCode Go model provider and settings UI for DeepSeek Harness",
   "icon": "assets/icon.png",
   "type": "module",
@@ -35,8 +35,13 @@
     "lib",
     "cordis.patch.yml",
     "THIRD_PARTY_NOTICES.md",
-    "docs",
-    "examples"
+    "docs/*.md",
+    "docs/assets/logo-light.png",
+    "docs/assets/logo-dark.png",
+    "examples",
+    "scripts/licenses",
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
   "dsh": {
     "bundle": {
@@ -55,19 +60,25 @@
   "scripts": {
     "compile": "node scripts/build.mjs",
     "check:dist": "node scripts/build.mjs --check",
+    "check:pack": "node scripts/check-pack.mjs",
+    "check:install:pnpm": "node scripts/check-pnpm-install.mjs",
     "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "check:hygiene": "node scripts/check-source.mjs",
     "test": "vitest run",
     "test:ci": "npm run check:dist && npm test",
+    "prepack": "npm run check:dist",
+    "prepublishOnly": "npm run typecheck && npm run test:ci",
     "verify:installed": "node --expose-internals scripts/installed-smoke.mjs",
     "verify:headless": "node scripts/headless-smoke.mjs",
-    "verify": "npm run typecheck && npm run test:ci && npm run verify:installed"
+    "verify": "npm run typecheck && npm run check:hygiene && npm run test:ci && npm run verify:installed"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/cordis": "^4.0.5",
     "@deepseek-ai/dsh-api-gateway": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-api-remotes": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-api-settings-controller": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-attachment": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-brand": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-client-locale": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-client-store": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-client-ui-conversation": ">=0.2.1-rc.5",
@@ -82,12 +93,11 @@
     "@deepseek-ai/dsh-settings": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-timeout": ">=0.2.1-rc.5",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.5",
-    "@deepseek-ai/dsh-typert-registry": ">=0.2.1-rc.5"
+    "@deepseek-ai/dsh-typert-registry": ">=0.2.1-rc.5",
+    "@deepseek-ai/schemastery": ">=3.18.5 <4"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.129.0",
-    "@deepseek-ai/dsh-brand": "0.2.1-rc.5",
-    "@deepseek-ai/schemastery": "3.18.5",
     "openai": "7.19.0",
     "undici": "7.30.0"
   },
@@ -223,5 +233,19 @@
     "opencode-go",
     "llm",
     "cordis"
-  ]
+  ],
+  "optionalDependencies": {
+    "@oven/bun-darwin-aarch64": "1.4.4",
+    "@oven/bun-darwin-x64": "1.4.4",
+    "@oven/bun-freebsd-aarch64": "1.4.4",
+    "@oven/bun-freebsd-x64": "1.4.4",
+    "@oven/bun-linux-aarch64": "1.4.4",
+    "@oven/bun-linux-aarch64-android": "1.4.4",
+    "@oven/bun-linux-aarch64-musl": "1.4.4",
+    "@oven/bun-linux-x64": "1.4.4",
+    "@oven/bun-linux-x64-android": "1.4.4",
+    "@oven/bun-linux-x64-musl": "1.4.4",
+    "@oven/bun-windows-aarch64": "1.4.4",
+    "@oven/bun-windows-x64": "1.4.4"
+  }
 }

@@ -50,7 +50,7 @@ export interface AttemptOutcome {
   hasNext: boolean
 }
 
-/** Switching accounts must never replay output or already charged work. */
+/** Switching accounts must never replay output, charged work or model permission failures. */
 export function accountFallback(outcome: AttemptOutcome): GoAccountSwitch['reason'] | undefined {
   if (outcome.emitted || outcome.totalTokens > 0 || outcome.aborted || !outcome.hasNext) return undefined
   switch (outcome.failure?.code) {
@@ -63,7 +63,7 @@ export function accountFallback(outcome: AttemptOutcome): GoAccountSwitch['reaso
   }
 }
 
-/** Gateway credential, rate and quota failures cool down this account for five minutes. */
+/** Only credential, rate and quota failures cool down a key; PERMISSION_DENIED is model-scoped. */
 export function isGatewayKeyRejection(failure: { code: string }): boolean {
   return ['INVALID_CREDENTIAL', 'AUTH', 'RATE_LIMIT', 'QUOTA'].includes(failure.code)
 }
@@ -87,6 +87,7 @@ export class GoAccountManager {
   private generation = 0
   private signature = ''
   private credentialGeneration = 0
+  private settingsGeneration = 0
   private latestSeq = -1
   private notice: GoAccountSwitch | undefined
 
@@ -124,6 +125,7 @@ export class GoAccountManager {
   private async write(connection: Connection, patch: Partial<AccountSettings>): Promise<SettingsWriteResult> {
     const row = this.read(connection)
     await connection.settings.mutate(row.ns, Object.entries(patch).map(([field, value]) => ({ op: 'set' as const, path: [field], value })), row.revision)
+    this.settingsGeneration++
     return 'applied'
   }
 
@@ -218,10 +220,17 @@ export class GoAccountManager {
     return this.write(connection, { accounts, apiKeyEnv: accounts[0]!.apiKeyEnv })
   }
 
+  /**
+   * The Host announces every revision of this profile entry, including edits
+   * made outside this manager (forms, native config, `A -> C -> A` round
+   * trips). Counting them keeps `capture()` free of `settings.describe()`,
+   * which deep-clones every namespace, on request and usage-poll hot paths.
+   */
+  settingsChanged(): void { this.settingsGeneration++ }
+
   /** A freshness fence prevents an old request from overriding a later user choice. */
   capture(): number {
-    const row = this.connection && accountSettingsRow(this.connection.settings)
-    const signature = JSON.stringify([accountIdentity(this.config()), this.credentialGeneration, row?.revision])
+    const signature = JSON.stringify([accountIdentity(this.config()), this.credentialGeneration, this.settingsGeneration])
     if (signature !== this.signature) {
       this.signature = signature
       this.generation++
@@ -315,8 +324,9 @@ export class GoUsageService extends TypertRemoteService {
   private async readRef(ref?: string): Promise<GoUsage> {
     const identityKey = ref ?? ''
     // Retire removed accounts, including their secret-bearing identity records.
-    if (this.options.accountRefs) for (const saved of this.identities.keys()) {
-      if (saved && !this.options.accountRefs().includes(saved)) this.identities.delete(saved)
+    const refs = this.options.accountRefs?.()
+    if (refs) for (const saved of this.identities.keys()) {
+      if (saved && !refs.includes(saved)) this.identities.delete(saved)
     }
     const baseURL = assertBaseURL(this.options.baseURL()).replace(/\/$/, '')
     const proxyURL = assertProxyURL(this.options.proxyURL?.())

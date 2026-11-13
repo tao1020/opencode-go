@@ -4,12 +4,18 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import {
   modelSettingsKey,
   type ModelSource,
   DEFAULT_USAGE_DISPLAY,
   USAGE_DISPLAY_MODES,
+  DEFAULT_USAGE_PILL_STYLE,
+  USAGE_PILL_STYLES,
+  DEFAULT_OPENCODE_GO_THEME,
+  OPENCODE_GO_THEMES,
+  type OpencodeGoTheme,
   SETTINGS_NAMESPACE,
   type OpencodeGoConfig,
   type OpencodeGoSettings,
@@ -22,8 +28,6 @@ import {
   type GoModel,
   type GoModelCatalog,
   type GoUsage,
-  type AnalyticsQuery,
-  type AnalyticsReport,
   type AccountCommand,
   type SettingsWriteResult,
 } from '../contracts.ts'
@@ -32,12 +36,15 @@ export type { OpencodeGoSettings, OpencodeGoModelLimit, OpencodeGoModelLimits } 
 
 export const OPENCODE_GO_NS = SETTINGS_NAMESPACE
 
-export const TEXT_FIELDS = ['usageDisplay', 'baseURL', 'freeBaseURL', 'proxyURL', 'refreshMinutes',
-  'streamIdleTimeoutMs', 'maxImages', 'maxRequestImageBytes', 'requestImagePixelBudget', 'requestImageMaxBytes'] as const
+export const TEXT_FIELDS = ['usageDisplay', 'usagePillStyle', 'appearanceTheme', 'showSidebarQuota', 'freeEnabled', 'baseURL', 'freeBaseURL', 'proxyURL', 'refreshMinutes',
+  'streamIdleTimeoutMs', 'requestPreparationTimeoutMs', 'requestTimeoutMs', 'maxImages', 'maxRequestImageBytes', 'requestImagePixelBudget',
+  'requestImageMaxBytes'] as const
 
 export type TextField = typeof TEXT_FIELDS[number]
 
-export type EditableField = TextField | 'modelLimits'
+export const editableKeys = [...TEXT_FIELDS, 'modelLimits'] as const
+
+export type EditableField = typeof editableKeys[number]
 
 export interface FieldState { text: string; overridden: boolean; invalid: boolean }
 
@@ -49,7 +56,17 @@ export interface FormActions {
   discard(): void
 }
 
-interface FormShell { available: boolean; writable: boolean; dirty: boolean; invalid: boolean; saving: boolean; failed: boolean }
+/** Settings-document availability, as the Host ConfigForm reports it. */
+export type SettingsStatus = 'loading' | 'ready' | 'unavailable'
+
+interface FormShell {
+  status: SettingsStatus
+  writable: boolean
+  dirty: boolean
+  invalid: boolean
+  saving: boolean
+  failed: boolean
+}
 
 type Draft = { kind: 'text'; text: string } | { kind: 'limits'; value: OpencodeGoModelLimits } | { kind: 'clear' }
 
@@ -57,13 +74,37 @@ interface PlannedWrite { field: EditableField; draft: Draft; write: FieldWrite |
 
 type FieldWrite = { kind: 'set'; value: OpencodeGoConfig[EditableField] } | { kind: 'clear' }
 
+/**
+ * Numeric bounds mirrored from the Host settings schema (`src/config.ts`), so an
+ * out-of-range draft is marked invalid here instead of being refused after Save
+ * with no field-level explanation. `MAX_TIMER_DELAY_MS` is the Host's own constant.
+ */
+export interface NumericFieldLimit { integer: boolean; min: number; max?: number }
+
+export const NUMERIC_FIELD_LIMITS: Partial<Record<TextField, NumericFieldLimit>> = {
+  refreshMinutes: { integer: true, min: 1, max: 7 * 24 * 60 },
+  streamIdleTimeoutMs: { integer: false, min: Number.MIN_VALUE, max: MAX_TIMER_DELAY_MS },
+  requestPreparationTimeoutMs: { integer: true, min: 1, max: MAX_TIMER_DELAY_MS },
+  requestTimeoutMs: { integer: true, min: 1, max: MAX_TIMER_DELAY_MS },
+  maxImages: { integer: true, min: 1, max: Number.MAX_SAFE_INTEGER },
+  maxRequestImageBytes: { integer: true, min: 1 },
+  requestImagePixelBudget: { integer: true, min: 1 },
+  requestImageMaxBytes: { integer: true, min: 1 },
+}
+
 function formatField(field: TextField, value: unknown): string {
   if (field === 'usageDisplay') return typeof value === 'string' ? value : DEFAULT_USAGE_DISPLAY
+  if (field === 'usagePillStyle') return typeof value === 'string' ? value : DEFAULT_USAGE_PILL_STYLE
+  if (field === 'appearanceTheme') return typeof value === 'string' ? value : DEFAULT_OPENCODE_GO_THEME
+  if (field === 'showSidebarQuota' || field === 'freeEnabled') return String(value === true)
   return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 }
 
 function parseField(field: TextField, text: string): FieldWrite | undefined {
   if (field === 'usageDisplay') return USAGE_DISPLAY_MODES.some(mode => mode === text) ? { kind: 'set', value: text as OpencodeGoConfig['usageDisplay'] } : undefined
+  if (field === 'usagePillStyle') return USAGE_PILL_STYLES.some(style => style === text) ? { kind: 'set', value: text as OpencodeGoConfig['usagePillStyle'] } : undefined
+  if (field === 'appearanceTheme') return OPENCODE_GO_THEMES.some(theme => theme === text) ? { kind: 'set', value: text as OpencodeGoTheme } : undefined
+  if (field === 'showSidebarQuota' || field === 'freeEnabled') return text === 'true' || text === 'false' ? { kind: 'set', value: text === 'true' } : undefined
   const trimmed = text.trim()
   if (field === 'proxyURL') {
     try { assertProxyURL(trimmed); return { kind: 'set', value: trimmed } }
@@ -73,12 +114,18 @@ function parseField(field: TextField, text: string): FieldWrite | undefined {
   if (field === 'baseURL' || field === 'freeBaseURL') {
     try {
       const url = new URL(trimmed)
-      return ['http:', 'https:'].includes(url.protocol) && !url.search && !url.hash ? { kind: 'set', value: trimmed } : undefined
+      // The Host rejects embedded credentials without echoing them; refusing here
+      // keeps the draft field-level invalid instead of failing the whole Save.
+      return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash
+        ? { kind: 'set', value: trimmed } : undefined
     } catch { return undefined }
   }
+  const limit = NUMERIC_FIELD_LIMITS[field]
+  if (limit === undefined) return undefined
   const value = Number(trimmed)
-  return Number.isFinite(value) && (field !== 'maxImages' || Number.isSafeInteger(value) && value > 0)
-    ? { kind: 'set', value } : undefined
+  if (!Number.isFinite(value) || limit.integer && !Number.isSafeInteger(value)
+    || value < limit.min || limit.max !== undefined && value > limit.max) return undefined
+  return { kind: 'set', value }
 }
 
 /** Structural comparison keeps model capacities as objects throughout editing and saving. */
@@ -168,14 +215,24 @@ export interface OpencodeGoSectionState extends FormShell {
   accounts: GoAccountsState
   enabled: boolean
   usageDisplay: FieldState
+  showSidebarQuota: FieldState
+  freeEnabled: FieldState
+  usagePillStyle: FieldState
+  appearanceTheme: FieldState
+  /** Last saved theme; text drafts preview without switching the applied interface. */
+  appliedAppearanceTheme: OpencodeGoTheme
   modelVisibility: Readonly<Record<string, boolean>>
   pickerSaving: boolean
   pickerFailed: boolean
+  /** The provider `enabled` switch write failed; separate from model visibility. */
+  enabledFailed: boolean
   baseURL: FieldState
   freeBaseURL: FieldState
   proxyURL: FieldState
   refreshMinutes: FieldState
   streamIdleTimeoutMs: FieldState
+  requestPreparationTimeoutMs: FieldState
+  requestTimeoutMs: FieldState
   maxImages: FieldState
   maxRequestImageBytes: FieldState
   requestImagePixelBudget: FieldState
@@ -188,8 +245,6 @@ export interface OpencodeGoSectionState extends FormShell {
 export interface OpencodeGoSectionFace extends FormActions, GoAccountsActions {
   hooks: { opencodeGo: SnapshotStore<OpencodeGoSectionState> }
   loadModels(): void
-  readAnalytics(query: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsReport>
-  readQuota(ref: string): Promise<GoUsage>
   setEnabled(next: boolean): void
   setModelEnabled(id: string, next: boolean): void
 }
@@ -203,6 +258,7 @@ export class OpencodeGoSectionController {
   private failed = false
   private pickerSaving = false
   private pickerFailed = false
+  private enabledFailed = false
   private models: OpencodeGoModels = { status: 'idle' }
   private modelsRequest = 0
   private face: OpencodeGoSectionFace | undefined
@@ -230,11 +286,6 @@ export class OpencodeGoSectionController {
     private readonly executeAccountCommand: ExecuteAccountCommand = async command => {
       const result = await ctx.remote.opencodeGoAccounts.execute(command)
       return result.ok ? result.value : 'unknown'
-    },
-    private readonly readAnalytics: (query: AnalyticsQuery, signal?: AbortSignal) => Promise<AnalyticsReport> = async () => {
-      throw Object.assign(new Error('OpenCode Go analytics is unavailable in this session'), {
-        code: 'opencode-go/analytics-unavailable', details: { reason: 'no-session-query', retryable: false },
-      })
     },
   ) {
     this.syncAccounts()
@@ -297,11 +348,13 @@ export class OpencodeGoSectionController {
     const snapshot = this.scope.getSnapshot()
     const plan = this.plan()
     return {
-      available: snapshot.status === 'ready', writable: snapshot.writable,
+      status: snapshot.status, writable: snapshot.writable,
       dirty: plan.length > 0, invalid: plan.some(item => !item.write), saving: this.saving || this.accountBusy, failed: this.failed,
       accounts: this.accountState(), enabled: snapshot.value?.enabled ?? true,
       ...Object.fromEntries(TEXT_FIELDS.map(field => [field, this.field(field)])) as Record<TextField, FieldState>,
+      appliedAppearanceTheme: snapshot.value?.appearanceTheme ?? DEFAULT_OPENCODE_GO_THEME,
       modelVisibility: snapshot.value?.modelVisibility ?? {}, pickerSaving: this.pickerSaving, pickerFailed: this.pickerFailed,
+      enabledFailed: this.enabledFailed,
       models: this.models,
       modelLimits: { overridden: this.drafts.get('modelLimits')?.kind === 'limits' || !this.drafts.has('modelLimits') && this.stored('modelLimits'), invalid: false },
       modelLimitDraft: modelLimitsOf(this.value('modelLimits')),
@@ -341,17 +394,25 @@ export class OpencodeGoSectionController {
   private async writePickerSetting(field: 'enabled' | 'modelVisibility', value: boolean | Record<string, boolean>): Promise<void> {
     if (this.blocked() || this.accountBusy || !this.scope.getSnapshot().writable) return
     this.pickerSaving = true
-    this.pickerFailed = false
+    // The provider switch and a model-visibility toggle fail into separate slots:
+    // one alert must never claim the other control is what did not update.
+    if (field === 'enabled') this.enabledFailed = false
+    else this.pickerFailed = false
     this.publish()
-    try { this.pickerFailed = !await this.scope.set(field, value) }
-    catch { this.pickerFailed = true }
-    finally { this.pickerSaving = false; this.publish() }
+    try {
+      const accepted = await this.scope.set(field, value)
+      if (field === 'enabled') this.enabledFailed = !accepted
+      else this.pickerFailed = !accepted
+    } catch {
+      if (field === 'enabled') this.enabledFailed = true
+      else this.pickerFailed = true
+    } finally { this.pickerSaving = false; this.publish() }
   }
 
   inject(): OpencodeGoSectionFace {
     this.face ??= {
       hooks: { opencodeGo: this.store },
-      loadModels: () => this.loadModels(), readAnalytics: (query, signal) => this.readAnalytics(query, signal), readQuota: ref => this.readUsage(ref),
+      loadModels: () => this.loadModels(),
       setEnabled: next => { void this.setEnabled(next) }, setModelEnabled: (id, next) => { void this.setModelEnabled(id, next) },
       edit: (field, text) => this.edit(field, { kind: 'text', text }),
       editModelLimits: value => this.edit('modelLimits', { kind: 'limits', value: structuredClone(value) }),
@@ -433,6 +494,7 @@ export class OpencodeGoSectionController {
     if (!accountsOf(this.scope.getSnapshot().value ?? {}).some(account => account.apiKeyEnv === ref)) return
     this.accountEpoch++
     this.accountRows.delete(ref)
+    this.publish()
     if (this.accountsLoaded) void this.refreshAccounts()
   }
 
@@ -453,18 +515,27 @@ export class OpencodeGoSectionController {
         return
       }
       this.accountFailure = undefined
+      // Publish every row's key state (and the loading marker) once, before any
+      // slow usage read, so unconfigured keys and spinners appear immediately.
+      const previousRows = new Map(accounts.map(account => [account.apiKeyEnv, this.accountRows.get(account.apiKeyEnv)]))
+      for (const account of accounts) {
+        const ref = account.apiKeyEnv
+        const info = described.value[ref]
+        if (info?.configured) this.accountRows.set(ref, { ...previousRows.get(ref), ...account, configured: true,
+          writable: info.writable, loading: true, failed: false })
+        else this.accountRows.set(ref, { ...account, configured: false, writable: info?.writable ?? true })
+      }
+      this.publish()
       await Promise.all(accounts.map(async account => {
         const ref = account.apiKeyEnv
         const info = described.value[ref]
-        const previous = this.accountRows.get(ref)
-        this.accountRows.set(ref, { ...previous, ...account, configured: info?.configured ?? false,
-          writable: info?.writable ?? true, loading: info?.configured === true, failed: false })
-        this.publish()
-        if (!info?.configured) { this.accountRows.set(ref, { ...account, configured: false, writable: info?.writable ?? true }); return }
+        const previous = previousRows.get(ref)
+        if (!info?.configured) return
         try {
           const usage = await this.readUsage(ref)
           if (this.disposed || epoch !== this.accountEpoch) return
           this.accountRows.set(ref, { ...account, configured: true, writable: info.writable, usage, updatedAt: Date.now() })
+          this.publish()
         } catch (error) {
           if (this.disposed || epoch !== this.accountEpoch) return
           const details = error && typeof error === 'object' && 'code' in error && error.code === 'opencode-go/usage-unavailable'
@@ -477,8 +548,8 @@ export class OpencodeGoSectionController {
           this.accountRows.set(ref, { ...account, configured: true, writable: info.writable, failed: true,
             problem: message.length > 512 ? message.slice(0, 512) + '…' : message,
             ...(retain ? { usage: previous.usage, updatedAt: previous.updatedAt, stale: true } : {}) })
+          this.publish()
         }
-        this.publish()
       }))
     } catch (error) {
       if (epoch === this.accountEpoch) {

@@ -31,8 +31,8 @@ import {
   validateGoConfig,
 } from './config.ts'
 import { GoUsageService, GoAccountManager, GoAccountsService } from './accounts.ts'
-import { GoAnalyticsService, analyticsPriceBook, type AnalyticsSessionQuery } from './analytics.ts'
-import { accountsOf, accountRefOf, SETTINGS_NAMESPACE, goRemote } from './contracts.ts'
+import { GoAnalyticsService } from './analytics.ts'
+import { accountsOf, accountRefOf, PROFILE_ENTRY_ID, SETTINGS_NAMESPACE, goRemote } from './contracts.ts'
 import { ProxyTransport } from './transport.ts'
 import {
   createHttpPrivacyClient,
@@ -124,6 +124,8 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
   ctx.plugin(GoAccountsService, { manager: accountManager })
   ctx.inject(['settings', 'credentials'], ready => {
     ready.effect(() => accountManager.connect(ready.settings, ready.credentials))
+    // Fence edits made outside the manager so a stale fallback cannot settle after A -> C -> A.
+    ready.on('settings/document-updated', ns => { if (ns === PROFILE_ENTRY_ID) accountManager.settingsChanged() })
   })
   const transport = new ProxyTransport()
   ctx.effect(() => () => transport.dispose())
@@ -146,11 +148,15 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
   }
   let registration: AdapterRegistrationHandle | undefined
   let freeRegistration: AdapterRegistrationHandle | undefined
+  /** Bounded, per-(model, reason) de-duplication for dropped-setting warnings. */
+  const warnedModelSettings = new Set<string>()
   const refreshPickers = (): void => {
     registration?.replace([PROVIDER_ID])
     freeRegistration?.replace([FREE_PROVIDER_ID])
   }
   let callSequence = 0
+  /** Free endpoint origins already reported as not reuse-bound for saved keys. */
+  const withheldFreeEndpoints = new Set<string>()
   const catalogs = new GoCatalogManager({
     transport, onFallback: logger.fallback, onOmitted: logger.omitted,
     onWarning: warning => { ctx.logger.warn(`llm-opencode-go: ${warning}`) },
@@ -171,8 +177,28 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
         ref,
       ),
     },
+    // One notice per withheld Free endpoint and mount: the Free route never
+    // reuses saved credentials for an endpoint the accounts are not bound to,
+    // and a request storm must not repeat the explanation. The value is the
+    // endpoint origin only, never a key.
+    onFreeCredentialWithheld: (detail: { reason: 'unbound-free-endpoint'; freeBaseURL: string }) => {
+      if (withheldFreeEndpoints.has(detail.freeBaseURL)) return
+      if (withheldFreeEndpoints.size >= 8) withheldFreeEndpoints.clear()
+      withheldFreeEndpoints.add(detail.freeBaseURL)
+      ctx.logger.info(`llm-opencode-go: not reusing saved credentials for the Free endpoint ${detail.freeBaseURL}; using public access`)
+    },
     onReplayDegrade: (reason: string) => {
       ctx.logger.warn(`llm-opencode-go: unusable replay state on assistant history; sending provider-neutral content (${reason})`)
+    },
+    // Configured thinking budgets are filtered/clamped instead of failing the
+    // model; surface each distinct dropped setting once so a stale profile can
+    // be fixed without per-request log spam.
+    onModelWarning: (detail: { model: string; reason: string }) => {
+      const key = detail.model + '\u0000' + detail.reason
+      if (warnedModelSettings.has(key)) return
+      if (warnedModelSettings.size >= 64) warnedModelSettings.clear()
+      warnedModelSettings.add(key)
+      ctx.logger.warn(`llm-opencode-go: model "${detail.model}": ${detail.reason}`)
     },
   }
   // The paid Go adapter owns the privacy callback. The free adapter is built
@@ -188,26 +214,34 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
   const freeAdapter = new OpencodeGoAdapter({ ...adapterOptions, source: 'free', catalog: config => catalogs.forConfig(config, 'free') })
   ctx.plugin(GoModelsService, {
     catalog: () => catalogs.forConfig(current()),
-    freeCatalog: () => catalogs.forConfig(current(), 'free'),
+    // Free is an explicit opt-in: while it is off, its catalog is neither
+    // fetched nor included in the settings model directory.
+    freeCatalog: () => {
+      const config = current()
+      return config.freeEnabled ? catalogs.forConfig(config, 'free') : undefined
+    },
     onRefresh: refreshPickers,
   })
-  const sessionQueryOf = (): AnalyticsSessionQuery | undefined =>
-    (ctx as unknown as { get(name: string): unknown }).get('sessionQuery') as AnalyticsSessionQuery | undefined
   ctx.plugin(GoAnalyticsService, {
-    query: sessionQueryOf,
-    pricing: async () => analyticsPriceBook(...await Promise.all([
-      catalogs.forConfig(current()).snapshot(), catalogs.forConfig(current(), 'free').snapshot(),
-    ])),
+    baseURL: () => current().baseURL,
+    proxyURL: () => current().proxyURL,
+    transport,
+    resolveApiKey: (ref: string) => resolveApiKey({ ...current(), apiKeyEnv: ref }),
+    accountRefs: () => accountsOf(current()).map(account => account.apiKeyEnv),
   })
   const pickerVisibilityOf = (): string => JSON.stringify([current().modelVisibility ?? {}, current().modelLimits ?? {},
     current().baseURL, current().freeBaseURL, current().proxyURL])
   let pickerVisibility = pickerVisibilityOf()
-  /** Free follows enabled immediately; Go additionally requires a usable saved key. */
+  /**
+   * Serve the Go route only when a usable key exists; serve Free only when the
+   * user opted in with {@link OpencodeGoConfig.freeEnabled}. `enabled` remains
+   * the master switch for both.
+   */
   const applyRoute = (configured: boolean): void => {
     for (const source of ['go', 'free'] as const) {
       const id = source === 'go' ? PROVIDER_ID : FREE_PROVIDER_ID
       const handle = source === 'go' ? registration : freeRegistration
-      const active = current().enabled && (source === 'free' || configured)
+      const active = current().enabled && (source === 'free' ? current().freeEnabled : configured)
       if (active && !handle) {
         try {
           const next = ctx.llm.registerAdapter([id], source === 'go' ? adapter : freeAdapter)
@@ -220,6 +254,26 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
         if (source === 'go') registration = undefined
         else freeRegistration = undefined
       }
+    }
+  }
+  /**
+   * Register or withdraw only the Free route. It must not touch the Go route:
+   * Go's presence waits for asynchronous credential checks and re-running the
+   * whole route decision here would make pickers flap on every sync.
+   */
+  const syncFreeRoute = (): void => {
+    const active = current().enabled && current().freeEnabled
+    if (active && !freeRegistration) {
+      try {
+        freeRegistration = ctx.llm.registerAdapter([FREE_PROVIDER_ID], freeAdapter)
+        ctx.logger.info(`llm-opencode-go: route "${FREE_PROVIDER_ID}" registered as ${FREE_DISPLAY_NAME}`)
+      } catch (error) { ctx.logger.error(`llm-opencode-go: not registering the "${FREE_PROVIDER_ID}" route (${String(error)})`) }
+    } else if (!active && freeRegistration) {
+      // Withdrawing the route only removes the provider; a request already
+      // streaming through it keeps its iterator and is allowed to finish.
+      freeRegistration()
+      freeRegistration = undefined
+      ctx.logger.info(`llm-opencode-go: route "${FREE_PROVIDER_ID}" withdrawn (Free channel disabled)`)
     }
   }
   let routeCheck = 0
@@ -244,12 +298,11 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
       freeAdapter.forgetRejectedKey(selected)
     }
     const refs = accountsOf(config).map(account => account.apiKeyEnv)
-    // Free is available immediately, including while credential storage is resolving.
     if (!config.enabled) { applyRoute(false); return }
-    if (!freeRegistration) {
-      try { freeRegistration = ctx.llm.registerAdapter([FREE_PROVIDER_ID], freeAdapter) }
-      catch (error) { ctx.logger.error(`llm-opencode-go: not registering the "${FREE_PROVIDER_ID}" route (${String(error)})`) }
-    }
+    // Free is an explicit opt-in and needs no credential check, so register or
+    // withdraw it immediately: a settings toggle takes effect on the next sync
+    // (loader/volatile-update) without waiting for account resolution.
+    syncFreeRoute()
     if (credentials === undefined) {
       applyRoute(refs.some(ref => {
         const value = launchEnvironmentOf(ctx).get(ref)?.value
@@ -287,7 +340,7 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
   syncRoute()
   let undiscover: () => void = () => {}
   try {
-    undiscover = ctx.llm.registerModelDiscovery(name, async (request: LlmModelDiscoveryRequest) => {
+    undiscover = ctx.llm.registerModelDiscovery(name, async (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => {
       if (request.provider !== PROVIDER_ID && request.provider !== FREE_PROVIDER_ID
         && !isOfficialEndpoint(request.baseURL)) {
         throw new LlmError(
@@ -297,7 +350,20 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
       }
       const source = request.provider === FREE_PROVIDER_ID || request.provider !== PROVIDER_ID
         && request.baseURL !== undefined && !new URL(request.baseURL).pathname.includes('/go/') ? 'free' : 'go'
-      return discoverCatalogModels(catalogs.forConfig(current(), source))
+      const config = current()
+      if (source === 'free' && !config.freeEnabled) {
+        // Free is an explicit opt-in: refuse its discovery instead of fetching
+        // (or advertising) a catalog for a channel the user has not enabled.
+        throw new LlmError(
+          'llm-opencode-go: the Free channel is disabled; enable it in Settings → Advanced settings',
+          'DISCOVERY_UNSUPPORTED',
+        )
+      }
+      // `LlmModelDiscoveryRequest` carries no signal; the registration callback's
+      // second argument is the caller's cancellation and is forwarded into the
+      // shared snapshot waiter. Aborting cancels only this discovery caller —
+      // the refresh itself continues for other readers and the next discovery.
+      return discoverCatalogModels(catalogs.forConfig(config, source), signal)
     })
   } catch (error: unknown) {
     // A duplicate mount may already own our discovery registration — the same
@@ -306,13 +372,16 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
     ctx.logger.error(`llm-opencode-go: not registering model discovery for "${name}" (${String(error)})`)
   }
   ctx.effect(() => () => {
-    /* v8 ignore start -- plugin unload never runs in tests: no Context disposal API is exercised */
     registration?.()
     registration = undefined
     freeRegistration?.()
     freeRegistration = undefined
     undiscover()
-    /* v8 ignore stop */
+    // Adapters own their per-route Free transports (Bun workers and SOCKS
+    // tunnels); each dispose releases those. The shared ProxyTransport belongs
+    // to the Host effect registered above, and the adapters know not to
+    // dispose an injected transport.
+    return Promise.all([adapter.dispose(), freeAdapter.dispose()]).then(() => {})
   })
   installHostSettings(ctx)
   ctx.on('loader/volatile-update', syncRoute)

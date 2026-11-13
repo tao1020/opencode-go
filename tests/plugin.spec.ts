@@ -31,9 +31,11 @@ import {
   type SaveImageAttachment,
   type StoredImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
-import { Config, type LiveConfig } from '../src/config.ts'
+import { Config, DEFAULT_CONFIG, normalizeConfig, type LiveConfig } from '../src/config.ts'
 import { OpencodeGoCatalog } from '../src/catalog.ts'
-import { modelsDocument, modelEntry } from './support/data.ts'
+import { FreeBunTransport } from '../src/free-transport.ts'
+import { ProxyTransport } from '../src/transport.ts'
+import { modelsDocument, modelEntry, protocolEntry } from './support/data.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -91,10 +93,36 @@ describe("route lifecycle", () => {
         expect((await ctx.llm.listModels('dsh-opencode-go')).map(model => model.id)).toEqual([id])
         expect(updated).not.toHaveBeenCalled()
         metadata.resolve(Response.json(modelsDocument({ [id]: modelEntry(), 'new-model': modelEntry() })))
-        await expect.poll(() => updated.mock.calls.length).toBe(2)
+        await expect.poll(() => updated.mock.calls.length).toBe(1)
         expect((await ctx.llm.listModels('dsh-opencode-go')).map(model => model.id)).toEqual([id, 'new-model'])
       } finally {
         metadata.resolve(Response.json(modelsDocument()))
+        await ctx.fiber.dispose()
+      }
+    })
+
+    it('releases both adapters and their Free transports when the plugin unloads', async () => {
+      vi.stubEnv('OPENCODE_API_KEY', 'test-key')
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      const ctx = new Context()
+      await ctx.plugin(LlmRuntime)
+      const freeTransportDispose = vi.spyOn(FreeBunTransport.prototype, 'dispose')
+      const transportDispose = vi.spyOn(ProxyTransport.prototype, 'dispose')
+      try {
+        apply(ctx, configOf(gateway.url, { freeEnabled: true }))
+        await expect.poll(() => ctx.llm.listProviders().map(provider => provider.id).sort())
+          .toEqual(['dsh-opencode-free', 'dsh-opencode-go'])
+
+        await ctx.fiber.dispose()
+
+        // Each adapter owns one Free transport (Bun workers and SOCKS tunnels).
+        expect(freeTransportDispose).toHaveBeenCalledTimes(2)
+        // The Host owns the shared ProxyTransport; the adapters must not
+        // dispose a transport they did not create.
+        expect(transportDispose).toHaveBeenCalledTimes(1)
+      } finally {
+        freeTransportDispose.mockRestore()
+        transportDispose.mockRestore()
         await ctx.fiber.dispose()
       }
     })
@@ -361,16 +389,60 @@ describe("route lifecycle", () => {
       expect(models.map(model => model.id)).toContain('deepseek-v4.1-flash')
     })
 
+    it('honors discovery cancellation while the shared catalog refresh continues', async () => {
+      vi.stubEnv('OPENCODE_API_KEY', 'test-key')
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      const original = globalThis.fetch
+      let modelsRequests = 0
+      const metadata = Promise.withResolvers<Response>()
+      vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) !== `${gateway.url}/models`) return original(input, init)
+        modelsRequests += 1
+        return modelsRequests === 1 ? metadata.promise : Promise.resolve(Response.json(listingBody(fullLiveListing())))
+      })
+      const ctx = new Context()
+      await ctx.plugin(LlmRuntime)
+      apply(ctx, configOf(gateway.url))
+      try {
+        const controller = new AbortController()
+        const reason = new Error('caller cancelled discovery')
+        const discovery = ctx.llm.discoverModels('llm-opencode-go', { provider: 'dsh-opencode-go' }, controller.signal)
+        await vi.waitFor(() => expect(modelsRequests).toBe(1))
+        controller.abort(reason)
+        // The callback forwards the signal into the shared snapshot waiter, so
+        // this caller settles with the catalog abort error instead of waiting
+        // for the shared catalog refresh.
+        const cancelled = await discovery.catch(error => error)
+        expect(cancelled).toMatchObject({ code: 'ABORTED', message: expect.stringContaining('aborted by caller') })
+        expect(cancelled.cause).toBe(reason)
+        expect(modelsRequests).toBe(1)
+
+        // An already-aborted caller never starts a catalog request at all.
+        const preAborted = new AbortController()
+        preAborted.abort(new Error('already cancelled discovery'))
+        await expect(ctx.llm.discoverModels('llm-opencode-go', { provider: 'dsh-opencode-go' }, preAborted.signal))
+          .rejects.toMatchObject({ code: 'ABORTED', message: expect.stringContaining('aborted by caller') })
+        expect(modelsRequests).toBe(1)
+
+        // The shared refresh itself was not aborted: a later discovery answers.
+        metadata.resolve(Response.json(listingBody(fullLiveListing())))
+        await expect.poll(async () => (await ctx.llm.discoverModels('llm-opencode-go', { provider: 'dsh-opencode-go' })).length)
+          .toBeGreaterThan(0)
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    })
+
     it('activates only Free until a usable credential enables Go', async () => {
       Reflect.deleteProperty(process.env, 'OPENCODE_API_KEY')
       const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
       const ctx = new Context()
       await ctx.plugin(LlmRuntime)
-      apply(ctx, configOf(gateway.url))
+      apply(ctx, configOf(gateway.url, { freeEnabled: true }))
 
       // No key anywhere: the route stays dormant so first-run onboarding never
       // mistakes it for a usable provider, and no request reaches the gateway.
-      await new Promise(resolve => setTimeout(resolve, 50))
+      await new Promise(resolve => setTimeout(resolve, 200))
       expect(ctx.llm.listProviders()).toEqual([{ id: 'dsh-opencode-free', name: 'DSH OpenCode Free' }])
       expect(gateway.paths).toEqual([])
     })
@@ -644,6 +716,15 @@ describe("Loader composition", () => {
 })
 
 describe('profile forms and live configuration', () => {
+  it('normalizes old profiles to badge appearance with sidebar quota disabled and validates saved choices', () => {
+    expect(DEFAULT_CONFIG).toMatchObject({ showSidebarQuota: false, usagePillStyle: 'badge' })
+    expect(normalizeConfig()).toMatchObject({ showSidebarQuota: false, usagePillStyle: 'badge' })
+    expect(normalizeConfig({ showSidebarQuota: true, usagePillStyle: 'plain' })).toMatchObject({ showSidebarQuota: true, usagePillStyle: 'plain' })
+    expect(DEFAULT_CONFIG).toMatchObject({ showSidebarQuota: false, usagePillStyle: 'badge' })
+    expect(() => normalizeConfig({ usagePillStyle: 'neon' as never })).toThrow()
+    expect(() => normalizeConfig({ showSidebarQuota: 'true' as never })).toThrow()
+  })
+
   async function profile(baseURL: string) {
     const ctx = context()
     const secrets = new Map([['OPENCODE_API_KEY', 'profile-key']])
@@ -693,7 +774,7 @@ describe('profile forms and live configuration', () => {
     await expect.poll(() => ctx.llm.listProviders()).toEqual([])
     expect(entry.fiber).toBe(fiber)
     await ctx.settings.update('opencode-go', { enabled: true, modelVisibility: { 'deepseek-v4.1-flash': false } })
-    await expect.poll(() => ctx.llm.listProviders()).toHaveLength(2)
+    await expect.poll(() => ctx.llm.listProviders()).toHaveLength(1)
     expect(await ctx.llm.listModels('dsh-opencode-go')).toEqual([])
     await ctx.settings.update('opencode-go', { modelVisibility: {}, modelLimits: { 'deepseek-v4.1-flash': { contextWindow: 123456, maxTokens: 2048 } } })
     const resolved = await ctx.llm.resolveModelInfo('dsh-opencode-go', 'deepseek-v4.1-flash')
@@ -704,6 +785,48 @@ describe('profile forms and live configuration', () => {
     expect(view().value).toMatchObject({ enabled: true, proxyURL: '' })
     expect(entry.fiber).toBe(fiber)
     expect(gateway.modelListings).toBe(1)
+  })
+
+  it('warns once about an ignored configured thinking budget and keeps the model usable', async () => {
+    const gateway = await mockGateway({ status: 200, body: modelsDocument({
+      budgeted: modelEntry({ api: protocolEntry('messages'), limit: { context: 10_000, output: 5_000 },
+        capabilities: { reasoning: { supported: true, toggle: true, budget: { min: 1024, max: 4096 } } } }),
+    }) })
+    const { ctx } = await profile(gateway.url)
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => { warnings.push(message) }) as typeof ctx.logger.warn
+    const budgetWarnings = () => warnings.filter(message => message.includes('thinking budget'))
+
+    await ctx.settings.update('opencode-go', { modelLimits: { budgeted: { thinkingBudgets: [60_000, 3000] } } })
+    const resolved = await ctx.llm.resolveModelInfo('dsh-opencode-go', 'budgeted')
+    expect(String(resolved.reasoning?.efforts.map(effort => effort.id))).not.toContain('budget:60000')
+    await ctx.llm.resolveModelInfo('dsh-opencode-go', 'budgeted')
+
+    // De-duplicated per (model, reason): one warning for the stale setting.
+    expect(budgetWarnings()).toHaveLength(1)
+    expect(budgetWarnings()[0]).toContain('budgeted')
+    expect(budgetWarnings()[0]).toContain('60000')
+
+    // A usable configuration is silent.
+    await ctx.settings.update('opencode-go', { modelLimits: { budgeted: { thinkingBudgets: [3000] } } })
+    await ctx.llm.resolveModelInfo('dsh-opencode-go', 'budgeted')
+    expect(budgetWarnings()).toHaveLength(1)
+  })
+
+  it('persists quota placement and appearance through the live profile without remounting the provider', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['deepseek-v4.1-flash']) })
+    const { ctx, entry, fiber, view } = await profile(gateway.url)
+    expect(view().value).toMatchObject({ showSidebarQuota: false, usagePillStyle: 'badge' })
+    await ctx.settings.update('opencode-go', { showSidebarQuota: true, usagePillStyle: 'plain' }, view().revision)
+    expect(view().value).toMatchObject({ showSidebarQuota: true, usagePillStyle: 'plain' })
+    expect(entry.options.config).toMatchObject({ showSidebarQuota: true, usagePillStyle: 'plain' })
+    expect(entry.fiber).toBe(fiber)
+    await expect(ctx.settings.update('opencode-go', { usagePillStyle: 'neon' })).rejects.toThrow()
+    await expect(ctx.settings.update('opencode-go', { showSidebarQuota: 'true' })).rejects.toThrow()
+    expect(view().value).toMatchObject({ showSidebarQuota: true, usagePillStyle: 'plain' })
+    await ctx.settings.update('opencode-go', { showSidebarQuota: false, usagePillStyle: 'badge' })
+    expect(view().value).toMatchObject({ showSidebarQuota: false, usagePillStyle: 'badge' })
+    expect(entry.fiber).toBe(fiber)
   })
 
   it('runs account commands through current RPC and forms, keeping secrets outside the configuration document', async () => {
@@ -751,7 +874,8 @@ describe('profile forms and live configuration', () => {
     for (const version of ['0.2.1-rc.4', '0.2.0', '0.1.6']) expect(satisfies(version, pkg.engines.dsh, { includePrerelease: true })).toBe(false)
     for (const version of ['0.2.1-rc.5', '0.2.1', '0.3.0']) expect(satisfies(version, pkg.engines.dsh, { includePrerelease: true })).toBe(true)
     expect(satisfies('4.0.5', pkg.peerDependencies['@deepseek-ai/cordis'])).toBe(true)
-    expect(satisfies('4.1.0', pkg.peerDependencies['@deepseek-ai/cordis'])).toBe(false)
+    expect(satisfies('4.1.0', pkg.peerDependencies['@deepseek-ai/cordis'])).toBe(true)
+    expect(satisfies('4.0.4', pkg.peerDependencies['@deepseek-ai/cordis'])).toBe(false)
     for (const entry of ['.', './client']) {
       expect(pkg.exports[entry]).toMatchObject({ types: expect.stringMatching(/\.d\.ts$/), default: expect.stringMatching(/\.js$/) })
       expect((await readFile(new URL('../' + pkg.exports[entry].default, import.meta.url))).byteLength).toBeGreaterThan(0)

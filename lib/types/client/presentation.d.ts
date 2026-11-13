@@ -1,5 +1,6 @@
-/** English and Chinese copy, palette tokens and local theme preferences. */
+/** English and Chinese copy and the shared Native/Classic presentation tokens. */
 import { type CSSProperties } from 'react';
+import { type OpencodeGoTheme } from '../contracts.ts';
 /** Copy dictionaries for the OpenCode Go settings page. English is the key-set source of truth. */
 export declare const en: {
     accountsTitle: string;
@@ -29,6 +30,8 @@ export declare const en: {
     accountSwitchBack: string;
     accountSwitchHint: string;
     accountSwitchFailed: string;
+    sidebarNextAccount: string;
+    sidebarAnalytics: string;
     accountFallbackQuota: string;
     accountFallbackCredential: string;
     accountsSummary: string;
@@ -60,6 +63,7 @@ export declare const en: {
     usageRefreshFailed: string;
     usageLastUpdated: string;
     usageRetry: string;
+    usageRefresh: string;
     usageRefreshing: string;
     analyticsOpen: string;
     analyticsTitle: string;
@@ -70,68 +74,55 @@ export declare const en: {
     analyticsRange7d: string;
     analyticsRange30d: string;
     analyticsRange90d: string;
+    analyticsAccount: string;
+    analyticsNoAccounts: string;
     analyticsRefresh: string;
     analyticsRetry: string;
     analyticsLoading: string;
     analyticsEmpty: string;
-    analyticsUnsupported: string;
     analyticsFailed: string;
+    analyticsRefreshed: string;
+    analyticsRefreshing: string;
+    analyticsStale: string;
     analyticsRequests: string;
     analyticsTokens: string;
     analyticsSpend: string;
-    analyticsCoverage: string;
-    analyticsSessions: string;
-    analyticsSeconds: string;
-    analyticsSummaries: string;
-    analyticsUnsettled: string;
-    analyticsByModel: string;
-    analyticsByDay: string;
+    analyticsCacheHit: string;
     analyticsInput: string;
     analyticsOutput: string;
     analyticsCacheRead: string;
-    analyticsPriced: string;
-    analyticsUnpriced: string;
-    analyticsMissing: string;
-    analyticsFailedSessions: string;
-    analyticsUnattributed: string;
-    analyticsUnread: string;
-    analyticsScanSegments: string;
-    analyticsStaleResults: string;
-    analyticsTruncated: string;
-    analyticsScanMore: string;
-    analyticsPriceSource: string;
-    analyticsNotInvoice: string;
-    analyticsPricingUnavailable: string;
-    analyticsLegacy: string;
-    analyticsCardTitle: string;
-    analyticsCardHint: string;
-    analyticsBoardLabel: string;
-    analyticsOpenBoard: string;
-    analyticsQuota: string;
-    analyticsQuotaHint: string;
-    analyticsQuotaFailed: string;
-    analyticsChartSpend: string;
-    analyticsChartTokens: string;
-    analyticsKicker: string;
-    analyticsLead: string;
-    analyticsLeadTop: string;
-    analyticsComposition: string;
-    analyticsCompositionHint: string;
-    analyticsCompositionOther: string;
-    analyticsCompositionFree: string;
-    analyticsModel: string;
-    analyticsCost: string;
-    analyticsShare: string;
-    analyticsCacheHit: string;
+    analyticsCacheWrite: string;
     analyticsDailyAverage: string;
-    analyticsPeak: string;
-    analyticsTotal: string;
-    themeLabel: string;
-    themeSilentBlack: string;
-    themeGraphite: string;
-    themeSeaSalt: string;
-    themeWarmSand: string;
-    themeHint: string;
+    analyticsModels: string;
+    analyticsActiveDays: string;
+    analyticsPerDay: string;
+    analyticsByDay: string;
+    analyticsTrendHint: string;
+    analyticsTokensMode: string;
+    analyticsRequestsMode: string;
+    analyticsChartHelp: string;
+    analyticsSelectDay: string;
+    analyticsByModel: string;
+    analyticsRankingHint: string;
+    analyticsDetails: string;
+    analyticsModel: string;
+    analyticsShare: string;
+    analyticsAllModels: string;
+    analyticsFewerModels: string;
+    analyticsExport: string;
+    analyticsExporting: string;
+    analyticsExportFailed: string;
+    analyticsPermission: string;
+    analyticsCredentials: string;
+    analyticsUnsupported: string;
+    analyticsPending: string;
+    analyticsInvalid: string;
+    analyticsQuota: string;
+    analyticsQuotaFailed: string;
+    analyticsAmountHint: string;
+    analyticsLagHint: string;
+    analyticsExportHint: string;
+    analyticsKicker: string;
     nav: string;
     title: string;
     titleLabel: string;
@@ -142,6 +133,7 @@ export declare const en: {
     enabledHint: string;
     enabledOff: string;
     enabledUnavailable: string;
+    enabledFailed: string;
     keyLabel: string;
     keyHint: string;
     keyConfigured: string;
@@ -162,6 +154,7 @@ export declare const en: {
     modelsSourceNeverFetched: string;
     modelsSourceUpdated: string;
     modelsRefreshing: string;
+    modelsRefreshingShort: string;
     modelsEmpty: string;
     limitsLabel: string;
     limitsHint: string;
@@ -177,6 +170,7 @@ export declare const en: {
     thinkingBudgetAdd: string;
     thinkingBudgetRemove: string;
     capacityDefault: string;
+    capacityDefaultCapped: string;
     capacityMissing: string;
     modalityLabel: string;
     modalityText: string;
@@ -213,6 +207,29 @@ export declare const en: {
     advancedResetAll: string;
     advancedLabel: string;
     groupUsage: string;
+    groupFree: string;
+    freeEnabledLabel: string;
+    freeEnabledHint: string;
+    settingsTabsLabel: string;
+    settingsTabOverview: string;
+    settingsTabModels: string;
+    settingsTabAppearance: string;
+    settingsTabAdvanced: string;
+    usageAppearanceLabel: string;
+    usageAppearanceReset: string;
+    appearanceThemeLabel: string;
+    appearanceThemeHint: string;
+    appearanceThemePreviewHint: string;
+    appearanceTheme_native: string;
+    appearanceTheme_classic: string;
+    showSidebarQuotaLabel: string;
+    showSidebarQuotaSummary: string;
+    showSidebarQuotaHint: string;
+    usagePillStyleLabel: string;
+    usagePillStyleHint: string;
+    usagePillStylePreviewHint: string;
+    usagePillStyle_badge: string;
+    usagePillStyle_plain: string;
     groupConnection: string;
     groupCacheTimeouts: string;
     groupImages: string;
@@ -233,6 +250,10 @@ export declare const en: {
     refreshMinutesHint: string;
     streamIdleTimeoutMsLabel: string;
     streamIdleTimeoutMsHint: string;
+    requestPreparationTimeoutMsLabel: string;
+    requestPreparationTimeoutMsHint: string;
+    requestTimeoutMsLabel: string;
+    requestTimeoutMsHint: string;
     maxImagesLabel: string;
     maxImagesHint: string;
     maxRequestImageBytesLabel: string;
@@ -249,60 +270,83 @@ export declare const en: {
     saving: string;
     savedFailed: string;
     readOnly: string;
+    settingsLoading: string;
     unavailable: string;
 };
 /** Chinese copy; the key set mirrors {@link en}. */
 export declare const zh: typeof en;
 /** Every copy key this page's dictionaries must supply. */
 export type OpencodeGoKey = keyof typeof en;
-/** One palette's six theme colors plus the neutral surface steps. */
+/** All visual values shared by the settings, quota and history surfaces. */
 export interface GoThemeTokens {
     readonly bg: string;
     readonly surface: string;
     readonly surface2: string;
     readonly border: string;
+    /** Control boundary; a checked local value so WCAG 1.4.11 3:1 never depends on Host tokens. */
+    readonly borderStrong: string;
     readonly text: string;
     readonly muted: string;
     readonly accent: string;
+    /** Output-token chart series; a checked local value, not the Host status-dot color. */
     readonly accent2: string;
+    readonly accentSoft: string;
+    readonly onAccent: string;
+    /** Cache-read chart series; a checked local value, not the Host status-dot color. */
+    readonly cacheRead: string;
+    /** Cache-write chart series; a checked local value, not the Host status-dot color. */
+    readonly cacheWrite: string;
+    /** A complete box-shadow declaration, not merely a shadow color. */
+    readonly shadow: string;
     readonly success: string;
     readonly warning: string;
     readonly danger: string;
+    readonly font: string;
+    readonly displayFont: string;
+    readonly numberFont: string;
+    readonly radiusSmall: string;
+    readonly radiusControl: string;
+    readonly radiusPill: string;
+    readonly radiusOption: string;
+    readonly radiusCard: string;
+    readonly radiusPopover: string;
+    readonly radiusModal: string;
+    readonly focusWidth: string;
+    readonly displayWeight: string;
+    readonly displayTracking: string;
 }
-/** The four selectable styles. */
-export declare const GO_THEMES: readonly ["silent-black", "graphite", "sea-salt", "warm-sand"];
-export type GoThemeId = typeof GO_THEMES[number];
-/** Graphite is the default: it is the quietest match for the Host chrome. */
-export declare const DEFAULT_GO_THEME: GoThemeId;
-/** Locale key carrying each theme's display name. */
-export declare const GO_THEME_LABELS: Record<GoThemeId, keyof typeof en>;
-/** Each style in both Host color schemes. */
-export declare const GO_THEME_TOKENS: Record<GoThemeId, {
-    dark: GoThemeTokens;
-    light: GoThemeTokens;
-}>;
-/** The selected style, stable until the next write. */
-export declare function getGoTheme(): GoThemeId;
+/** Host color scheme followed by both visual themes. */
+export type GoThemeScheme = 'dark' | 'light';
 /**
- * Select a style and persist it for this browser.
- * @param id - one of {@link GO_THEMES}; unknown ids are ignored.
+ * Opacity of an unselected chart bar. CSS paints the `--go-chart-*` series as
+ * a translucent layer over the page surface, so contrast checks must composite
+ * the rendered color with this value instead of measuring the raw token.
  */
-export declare function setGoTheme(id: GoThemeId): void;
-/** Subscribe to style changes (for useSyncExternalStore). */
-export declare function subscribeGoTheme(listener: () => void): () => void;
-/** Read the selected style in a component. */
-export declare function useGoTheme(): GoThemeId;
+export declare const CHART_BAR_OPACITY = 0.88;
 /**
- * Follow the Host's light/dark scheme. The layout presenter marks a dark body
- * with `data-ds-dark-theme`; the attribute is observed so switching the Host
- * theme updates the surfaces without a reload.
+ * Share of the theme's text colour mixed into a quota bar's track. Native light
+ * can paint the layer a card sits on with the card's own colour, so a track
+ * made of that surface token disappears against it; mixing text into the
+ * backdrop keeps the bar legible on every Host surface the pale layer cannot
+ * guarantee (about 1.4:1 against light surfaces, 1.7:1 in dark). Exported so
+ * the contrast tests composite exactly the percentage the stylesheet paints.
  */
-export declare function useHostScheme(): 'dark' | 'light';
-/** The active style's tokens for the Host's current scheme. */
-export declare function useGoThemeTokens(): GoThemeTokens;
+export declare const QUOTA_TRACK_PERCENT = 18;
+/** Classic is deliberately independent from Host and third-party theme overrides. */
+export declare const GO_THEME_FALLBACKS: Record<GoThemeScheme, GoThemeTokens>;
 /**
- * Inline custom properties consumed by the pill and dialog styles.
- * @param tokens - the active palette.
- * @returns a style object carrying every `--go-*` variable.
+ * Neutral values used when Native cannot resolve a Host token, and the resolved
+ * value of every contrast-checked token: those must keep WCAG 1.4.11 3:1
+ * whatever palette Host or a third-party theme supplies.
  */
+export declare const NATIVE_THEME_FALLBACKS: Record<GoThemeScheme, GoThemeTokens>;
+/** Theme first, color scheme second: Native follows the Host, Classic stays branded. */
+export declare const GO_THEME_TOKENS: Record<OpencodeGoTheme, Record<GoThemeScheme, GoThemeTokens>>;
+/** Follow the Host's body color-scheme marker without adding a Theme service dependency. */
+export declare function useHostScheme(): GoThemeScheme;
+/** Resolve one visual theme in the Host's current color scheme. */
+export declare function useGoThemeTokens(theme?: OpencodeGoTheme): GoThemeTokens;
+/** Format a date/time stamp using a module-level cached Intl.DateTimeFormat instance. */
+export declare function formatDateTime(value: number | string | Date, locale?: string, options?: Intl.DateTimeFormatOptions): string;
+/** Internal derived custom properties; third-party themes customize the Host tokens instead. */
 export declare function themeStyle(tokens: GoThemeTokens): CSSProperties;
