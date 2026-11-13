@@ -175,8 +175,20 @@ export declare class OpencodeGoAdapter extends LlmAdapter {
      */
     private readonly credentialVersions;
     private credentialEpoch;
-    /** Balances consecutive requests across the saved accounts, one turn each. */
+    /** Advances once per new conversation so balanced sessions spend accounts in turn. */
     private accountCursor;
+    /**
+     * Pins a balanced conversation to one account. Consecutive turns then reuse
+     * that account's prompt cache instead of re-sending the whole transcript to a
+     * different account every turn.
+     */
+    private readonly sessionAccounts;
+    /**
+     * Records the account a conversation is pinned to. The map is bounded so a
+     * long-lived host cannot grow it without limit; re-inserting moves a session
+     * to the recent end, so the oldest entry is the one evicted.
+     */
+    private rememberSessionAccount;
     /** Monotonic sequence of the latest request this adapter started. */
     private callSeq;
     private nextCallSequence;
