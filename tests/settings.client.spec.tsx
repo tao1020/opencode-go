@@ -60,7 +60,7 @@ describe("settings page and typed capacity editing", () => {
     pickerSaving: false,
     pickerFailed: false,
     enabledFailed: false,
-    accounts: { entries: [], activeRef: 'OPENCODE_API_KEY', autoSwitch: false, busy: false, blocked: false, refreshing: false },
+    accounts: { entries: [], activeRef: 'OPENCODE_API_KEY', autoSwitch: false, balanceAccounts: false, busy: false, blocked: false, refreshing: false },
   }
 
   type ModelEntry = import('../src/contracts.ts').GoModel
@@ -110,6 +110,7 @@ describe("settings page and typed capacity editing", () => {
       removeAccount: vi.fn(async () => true),
       selectAccount: vi.fn(async () => true),
       setAutoSwitch: vi.fn(async () => true),
+      setBalanceAccounts: vi.fn(async () => true),
       replaceAccountKey: vi.fn(async () => true),
       moveAccount: vi.fn(async () => true),
       resetField: vi.fn(),

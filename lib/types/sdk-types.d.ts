@@ -1683,6 +1683,9 @@ type AccountCommand = {
 } | {
     kind: 'auto-switch';
     value: boolean;
+} | {
+    kind: 'balance';
+    value: boolean;
 };
 type SettingsWriteResult = 'applied' | 'rejected' | 'unknown';
 type AnalyticsRange = 'today' | '7d' | '30d' | '90d';

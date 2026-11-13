@@ -6,6 +6,7 @@ import {
   type AccountCommand,
   accountsOf,
   assertAccounts,
+  rotateAccountRefs,
 } from '../src/contracts.ts'
 import { describe, afterEach, expect, it, vi } from 'vitest'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
@@ -59,12 +60,36 @@ describe("seamless account fallback", () => {
 
   it('preserves legacy credential configuration and distinguishes explicitly removing every account', () => {
     expect(PlainConfig().accounts).not.toEqual([])
+    expect(PlainConfig().balanceAccounts).toBe(false)
+    expect(rotateAccountRefs(['A', 'B', 'C'], 0)).toEqual(['A', 'B', 'C'])
+    expect(rotateAccountRefs(['A', 'B', 'C'], 1)).toEqual(['B', 'C', 'A'])
+    expect(rotateAccountRefs(['A', 'B', 'C'], 4)).toEqual(['B', 'C', 'A'])
+    expect(rotateAccountRefs([], 3)).toEqual([])
     expect(accountsOf(PlainConfig())).toEqual([{ id: 'legacy:OPENCODE_API_KEY', name: '', apiKeyEnv: 'OPENCODE_API_KEY' }])
     expect(accountsOf({ accounts: [], apiKeyEnv: 'ACCOUNT_A' })).toEqual([])
     expect(accountsOf({ accounts, apiKeyEnv: 'ACCOUNT_A' })).toEqual(accounts)
     expect(() => assertAccounts([...accounts, { ...accounts[0]!, id: 'duplicate' }])).toThrow(/duplicate/)
     expect(() => assertAccounts([{ ...accounts[0]!, apiKeyEnv: 'not a reference' }])).toThrow(/Invalid/)
     expect(() => assertAccounts(Array.from({ length: 21 }, (_, i) => ({ id: String(i), name: String(i), apiKeyEnv: `KEY_${i}` })))).toThrow(/20/)
+  })
+
+  it('starts balanced requests on the next account and never rewrites the saved order', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody([request().model]) })
+    const config = configOf(gateway.url, { accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true })
+    const switched = vi.fn()
+    const adapter = new OpencodeGoAdapter({ config: () => config, resolveApiKey: async config => `${config.apiKeyEnv}-secret`,
+      onAccountSwitch: switched })
+    for (let turn = 0; turn < 4; turn += 1) {
+      gateway.pushCompletions({ events: textEvents })
+      expect(await drain(adapter.stream(request())))
+        .toContainEqual(expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } }))
+    }
+    const served = gateway.headers.map(header => header.authorization).filter(Boolean)
+    expect(served).toEqual(['Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret',
+      'Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret'])
+    // Balancing is not a fallback: the saved primary and the notice stay put.
+    expect(switched.mock.calls.every(([notice]) => notice === undefined)).toBe(true)
+    expect(config.apiKeyEnv).toBe('ACCOUNT_A')
   })
 
   it.each([
@@ -455,6 +480,8 @@ describe('serialized account commands and primary selection', () => {
     expect(await host.manager.execute({ kind: 'replace-key', ref: a!.apiKeyEnv, key: ' rotated-key ' })).toBe('applied')
     expect(await host.manager.execute({ kind: 'auto-switch', value: true })).toBe('applied')
     expect(host.value().autoSwitch).toBe(true)
+    expect(await host.manager.execute({ kind: 'balance', value: true })).toBe('applied')
+    expect(host.value().balanceAccounts).toBe(true)
     expect(host.secrets.get(a!.apiKeyEnv)).toBe('rotated-key')
     expect(await host.manager.execute({ kind: 'remove', ref: a!.apiKeyEnv })).toBe('applied')
     expect(host.value().accounts).toEqual([{ ...b!, name: 'Personal' }])
@@ -488,6 +515,7 @@ describe('serialized account commands and primary selection', () => {
     { kind: 'select', ref: 'bad reference' },
     { kind: 'move', ref: 'A', toIndex: -1 },
     { kind: 'auto-switch', value: 'yes' },
+    { kind: 'balance', value: 'yes' },
     { kind: 'remove', ref: 'A', key: 'unexpected' },
   ])('rejects malformed commands before any side effect: %j', command => {
     expect(() => parseAccountCommand(command)).toThrow()

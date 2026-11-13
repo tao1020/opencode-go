@@ -24,6 +24,8 @@ export declare const en: {
     accountCancel: string;
     accountAutoSwitch: string;
     accountAutoSwitchHint: string;
+    accountBalance: string;
+    accountBalanceHint: string;
     accountPreferredTag: string;
     accountSwitchAction: string;
     accountSwitchTitle: string;

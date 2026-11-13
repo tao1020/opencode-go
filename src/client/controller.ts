@@ -187,6 +187,7 @@ export interface GoAccountsState {
   entries: readonly GoAccountView[]
   activeRef: string
   autoSwitch: boolean
+  balanceAccounts: boolean
   busy: boolean
   blocked: boolean
   refreshing: boolean
@@ -206,6 +207,7 @@ export interface GoAccountsActions {
   removeAccount: (ref: string) => Promise<boolean>
   selectAccount: (ref: string) => Promise<boolean>
   setAutoSwitch: (next: boolean) => Promise<boolean>
+  setBalanceAccounts: (next: boolean) => Promise<boolean>
   replaceAccountKey: (ref: string, key: string) => Promise<boolean>
   /** Move one account to a new position; the first row becomes the preferred account. */
   moveAccount: (ref: string, toIndex: number) => Promise<boolean>
@@ -466,6 +468,7 @@ export class OpencodeGoSectionController {
     return {
       entries: accountsOf(config).map(account => ({ ...this.accountRows.get(account.apiKeyEnv), ...account })),
       activeRef: accountRefOf(config), autoSwitch: config.autoSwitch === true,
+      balanceAccounts: config.balanceAccounts === true,
       busy: this.accountBusy, blocked: this.blocked(), refreshing: this.accountRefreshing, failure: this.accountFailure,
     }
   }
@@ -587,6 +590,7 @@ export class OpencodeGoSectionController {
       }),
       selectAccount: ref => this.runAccountAction(() => command({ kind: 'select', ref })),
       setAutoSwitch: value => this.runAccountAction(() => command({ kind: 'auto-switch', value })),
+      setBalanceAccounts: value => this.runAccountAction(() => command({ kind: 'balance', value })),
       replaceAccountKey: (ref, key) => this.runAccountAction(async () => {
         if (!key.trim() || this.accountRows.get(ref)?.writable === false) return false
         const accepted = await command({ kind: 'replace-key', ref, key })

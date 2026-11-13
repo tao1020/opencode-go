@@ -54,10 +54,14 @@ export interface AccountSettings {
     /** Omission/null preserves legacy credentials; an explicit empty list removes all accounts. */
     accounts?: readonly GoAccount[] | null;
     autoSwitch?: boolean;
+    /** Start each request on the next saved account, spending every subscription at once. */
+    balanceAccounts?: boolean;
 }
 export declare function accountRefOf(settings: AccountSettings): string;
 /** Promote one account while preserving every other account's relative order. */
 export declare function moveAccountFirst(accounts: readonly GoAccount[], ref: string): readonly GoAccount[];
+/** Rotate a saved order so the request after `cursor` requests starts on a later account. */
+export declare function rotateAccountRefs(refs: readonly string[], cursor: number): readonly string[];
 /** Read legacy selections as the first account until the host persists their order. */
 export declare function accountsOf(settings: AccountSettings): readonly GoAccount[];
 export declare function assertAccounts(accounts: readonly GoAccount[] | null | undefined, selectedRef?: string): void;
@@ -132,6 +136,8 @@ export interface OpencodeGoConfig {
     accounts?: GoAccount[] | null;
     /** Try other saved accounts on quota/credential rejection before any content is emitted. */
     autoSwitch?: boolean;
+    /** Start each request on the next saved account; the saved order stays unchanged. */
+    balanceAccounts?: boolean;
     /** Discovery/usage base; the official Go gateway selects inference endpoints by protocol. */
     baseURL: string;
     /** Platform discovery base; only explicitly free chat models are served. */
@@ -289,6 +295,9 @@ export type AccountCommand = {
     toIndex: number;
 } | {
     kind: 'auto-switch';
+    value: boolean;
+} | {
+    kind: 'balance';
     value: boolean;
 };
 export declare function parseAccountCommand(value: unknown): AccountCommand;
