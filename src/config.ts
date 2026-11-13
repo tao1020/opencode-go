@@ -11,9 +11,14 @@ import {
   migrateGatewayBaseURL,
   DEFAULT_USAGE_DISPLAY,
   USAGE_DISPLAY_MODES,
+  DEFAULT_USAGE_PILL_STYLE,
+  USAGE_PILL_STYLES,
+  DEFAULT_OPENCODE_GO_THEME,
+  OPENCODE_GO_THEMES,
   ACCOUNT_REF_PATTERN,
   DEFAULT_ACCOUNT_REF,
   MAX_ACCOUNTS,
+  MAX_THINKING_BUDGET_TOKENS,
   type OpencodeGoConfig,
   PROFILE_ENTRY_ID,
   assertProxyURL,
@@ -40,7 +45,13 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 60_000
 /** Runtime schema for {@link OpencodeGoConfig}. */
 const fields = {
   enabled: z.boolean().default(true),
+  // Free access is deliberately off unless the user opts in: requests are sent
+  // as the official OpenCode CLI user agent and may violate upstream terms.
+  freeEnabled: z.boolean().default(false),
   usageDisplay: z.union(USAGE_DISPLAY_MODES.map(mode => z.const(mode))).default(DEFAULT_USAGE_DISPLAY),
+  showSidebarQuota: z.boolean().default(false),
+  usagePillStyle: z.union(USAGE_PILL_STYLES.map(style => z.const(style))).default(DEFAULT_USAGE_PILL_STYLE),
+  appearanceTheme: z.union(OPENCODE_GO_THEMES.map(theme => z.const(theme))).default(DEFAULT_OPENCODE_GO_THEME),
   modelVisibility: z.dict(z.boolean().required()).default({}),
   // A bare environment variable name: an empty string would otherwise pass the
   // schema, then never match any account (accountRefOf normalizes it away) and
@@ -70,7 +81,7 @@ const fields = {
   modelLimits: z.dict(z.union([z.const(null), z.object({
     contextWindow: z.union([z.const(null), z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)]),
     maxTokens: z.union([z.const(null), z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)]),
-    thinkingBudgets: z.union([z.const(null), z.array(z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required()).max(16)]),
+    thinkingBudgets: z.union([z.const(null), z.array(z.number().step(1).min(1).max(MAX_THINKING_BUDGET_TOKENS).required()).max(16)]),
   })])).default({}),
   // Outbound masking through the local privacy daemon. Disabled by default.
   // Enabling it without a reachable daemon fails closed at the adapter.
@@ -82,6 +93,15 @@ const fields = {
 
 /** Plain configuration values used by validation and direct adapter consumers. */
 export const PlainConfig: z<OpencodeGoConfig> = z.object(fields)
+
+/** Derive defaults from the same schema used by persisted profile settings. */
+export const DEFAULT_CONFIG: Readonly<OpencodeGoConfig> = PlainConfig()
+
+/** Fill omitted profile fields and normalize the legacy official gateway. */
+export function normalizeConfig(value: Partial<OpencodeGoConfig> = {}): OpencodeGoConfig {
+  const config = PlainConfig({ ...DEFAULT_CONFIG, ...value })
+  return { ...config, baseURL: migrateGatewayBaseURL(config.baseURL) }
+}
 
 /** The Loader retains these references when profile fields change. */
 export type LiveConfig = { [K in keyof OpencodeGoConfig]-?: { get(): OpencodeGoConfig[K] } }
@@ -100,10 +120,35 @@ export function readConfig(config: LiveConfig): OpencodeGoConfig {
 }
 
 /**
- * Accept only an http(s) base without a query or fragment. Runs at load for
- * the composition layer and as the settings section's write validator, so a
- * bad URL fails where it is written, never at first request.
+ * Render a base URL for an error message without URL credentials, query or
+ * fragment. A string URL cannot carry header secrets, but `user:password@` is
+ * exactly the input these diagnostics must never echo; an unparseable string
+ * that mentions `@` is therefore replaced with a placeholder.
+ * @param raw - the user-supplied base URL.
+ * @returns the safe display form.
+ */
+function diagnosticBaseURL(raw: string): string {
+  try {
+    const url = new URL(raw)
+    url.username = ''
+    url.password = ''
+    url.search = ''
+    url.hash = ''
+    return url.href
+  } catch {
+    return raw.includes('@') ? '[redacted URL]' : raw
+  }
+}
+
+/**
+ * Accept only an http(s) base without embedded credentials, query or fragment.
+ * Runs at load for the composition layer and as the settings section's write
+ * validator, so a bad URL fails where it is written, never at first request.
+ * Credentials never belong in this URL: `fetch` rejects such URLs outright and
+ * any failure diagnostic could otherwise carry them, so the value is refused
+ * before it can reach a request or a log line.
  * @param raw - the configured base URL.
+ * @param field - configuration field name for the diagnostic.
  * @returns the current gateway base URL without trailing slashes.
  */
 export function assertBaseURL(raw: string, field: 'baseURL' | 'freeBaseURL' = 'baseURL'): string {
@@ -111,13 +156,17 @@ export function assertBaseURL(raw: string, field: 'baseURL' | 'freeBaseURL' = 'b
   try {
     url = new URL(raw)
   } catch {
-    throw new Error(`llm-opencode-go: ${field} "${raw}" is not a valid URL`)
+    throw new Error(`llm-opencode-go: ${field} "${diagnosticBaseURL(raw)}" is not a valid URL`)
   }
+  if (url.username || url.password) {
+    throw new Error(`llm-opencode-go: ${field} must not embed credentials; remove the user:password@ part`)
+  }
+  const display = diagnosticBaseURL(raw)
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new Error(`llm-opencode-go: ${field} "${raw}" must be http or https`)
+    throw new Error(`llm-opencode-go: ${field} "${display}" must be http or https`)
   }
   if (url.search.length > 0 || url.hash.length > 0) {
-    throw new Error(`llm-opencode-go: ${field} "${raw}" must not carry a query or fragment`)
+    throw new Error(`llm-opencode-go: ${field} "${display}" must not carry a query or fragment`)
   }
   const normalized = url.toString().replace(/\/+$/, '')
   return field === 'baseURL' ? migrateGatewayBaseURL(normalized) : normalized

@@ -1,6 +1,5 @@
 /** Browser-safe configuration, account metadata and RPC wire contracts. */
 import type { RemoteResult, TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol';
-import type { AnalyticsFailureReason, AnalyticsQuery, AnalyticsReport } from './analytics.ts';
 /** Public DSH route and the private SDK transport have separate identities. */
 export declare const PROVIDER_ID = "dsh-opencode-go";
 export declare const DISPLAY_NAME = "Default";
@@ -26,6 +25,13 @@ export declare function assertProxyURL(raw: string | undefined): string;
 export declare const USAGE_DISPLAY_MODES: readonly ["auto", "always", "off"];
 export type UsageDisplayMode = typeof USAGE_DISPLAY_MODES[number];
 export declare const DEFAULT_USAGE_DISPLAY: UsageDisplayMode;
+export declare const USAGE_PILL_STYLES: readonly ["badge", "plain"];
+export type UsagePillStyle = typeof USAGE_PILL_STYLES[number];
+export declare const DEFAULT_USAGE_PILL_STYLE: UsagePillStyle;
+/** Global plugin appearance, shared by Host validation and browser settings. */
+export declare const OPENCODE_GO_THEMES: readonly ["native", "classic"];
+export type OpencodeGoTheme = typeof OPENCODE_GO_THEMES[number];
+export declare const DEFAULT_OPENCODE_GO_THEME: OpencodeGoTheme;
 /** Client-safe account metadata. Secrets stay in the host credential service. */
 export type GoAccount = {
     id: string;
@@ -33,6 +39,12 @@ export type GoAccount = {
     apiKeyEnv: string;
 };
 export declare const MAX_ACCOUNTS = 20;
+/**
+ * Upper bound for one configured thinking budget, in tokens. Shared with the
+ * browser form so a stored value always fits a model's advertised ceiling while
+ * staying far below any tokenizer/timer limit.
+ */
+export declare const MAX_THINKING_BUDGET_TOKENS = 1000000;
 export declare const ACCOUNT_REF_PREFIX = "DSH_OPENCODE_GO_ACCOUNT_";
 export declare const DEFAULT_ACCOUNT_REF = "OPENCODE_API_KEY";
 /** A credential reference is a bare environment variable name, never empty or decorated. */
@@ -57,6 +69,21 @@ export interface GoAccountSwitch {
     at: number;
 }
 export declare const SETTINGS_NAMESPACE = "llm-opencode-go";
+/**
+ * Loader profile entry id this plugin ships in `cordis.patch.yml`.
+ *
+ * DSH settings addresses rows by Loader profile entry id: `SettingsDescriptor.ns`
+ * is `entry.options.id` in `@deepseek-ai/dsh-settings`, so this is NOT an
+ * intrinsic plugin namespace — it must match the `insert[].id` of the shipped
+ * profile patch. Renaming that patch id requires renaming this constant.
+ *
+ * A runtime fallback discovery is intentionally not attempted:
+ * `settings.describe()` exposes no plugin identity (`ns` is the entry id and
+ * `schema` is a per-mount uid/ref graph), so a heuristic match could bind
+ * account metadata to another plugin's row. The shipped patch id is the
+ * invariant; a renamed entry id is unsupported and fails loudly through the
+ * account manager ("Account settings are unavailable") instead of guessing.
+ */
 export declare const PROFILE_ENTRY_ID = "opencode-go";
 /**
  * One model's configured capacities. Every field is optional so a deployment
@@ -76,13 +103,27 @@ export type OpencodeGoModelLimits = Record<string, OpencodeGoModelLimit | null>;
 /** Runtime configuration for one plugin mount. */
 export interface OpencodeGoConfig {
     /**
-     * Whether this plugin serves Go and Free. False withdraws both routes and
-     * their models without unloading the settings page. Go additionally requires
-     * a usable configured key; Free supports public access.
+     * Master switch for both routes. False withdraws Go and Free and their models
+     * without unloading the settings page. Go additionally requires a usable
+     * configured key; Free additionally requires {@link freeEnabled}.
      */
     enabled: boolean;
+    /**
+     * Serve the Free provider, its models and its public access. Off by default:
+     * enabling it sends requests as the official OpenCode CLI user agent and may
+     * violate upstream terms or trigger rate limiting, so it is an explicit
+     * opt-in independent of {@link enabled}. While off, the Free route is not
+     * registered, its catalog is not fetched and its models are not discovered.
+     */
+    freeEnabled: boolean;
     /** Usage pill visibility; auto follows only the selected Go route. */
     usageDisplay: UsageDisplayMode;
+    /** Show quota in the sidebar independently of the selected conversation model. */
+    showSidebarQuota: boolean;
+    /** Appearance of the conversation input's quota trigger. */
+    usagePillStyle: UsagePillStyle;
+    /** Global plugin appearance theme. */
+    appearanceTheme: OpencodeGoTheme;
     /** Per-model picker switches; absent entries default to enabled unless deprecated. */
     modelVisibility?: Record<string, boolean>;
     /** Legacy credential reference, kept in sync with the first/current account. */
@@ -260,26 +301,73 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 }
 export declare const accountsRemote: TypertRemoteContribution;
 export type SettingsWriteResult = 'applied' | 'rejected' | 'unknown';
-export type { AnalyticsFailureReason, AnalyticsQuery, AnalyticsTotals, AnalyticsModelRow, AnalyticsDayRow, AnalyticsCoverage, AnalyticsPricing, AnalyticsReport } from './analytics.ts';
+export type AnalyticsRange = 'today' | '7d' | '30d' | '90d';
+export interface AnalyticsQuery {
+    accountRef: string;
+    range: AnalyticsRange;
+    refresh?: boolean;
+}
+/** Exact nonnegative integers on the wire; one USD is 100,000,000 micro cents. */
+export interface AnalyticsTotals {
+    requests: string;
+    inputTokens: string;
+    outputTokens: string;
+    cacheReadTokens: string;
+    cacheWrite5mTokens: string;
+    cacheWrite1hTokens: string;
+    cacheWriteTokens: string;
+    tokens: string;
+    costMicroCents: string;
+}
+export interface AnalyticsModelRow extends AnalyticsTotals {
+    provider: string;
+    model: string;
+}
+export interface AnalyticsDayRow extends AnalyticsTotals {
+    day: string;
+}
+export interface AnalyticsReport {
+    accountRef: string;
+    /** Opaque account, credential and network identity; contains no credential material. */
+    source: string;
+    generatedAt: number;
+    period: AnalyticsRange;
+    range: {
+        from: number;
+        to: number;
+    };
+    timeZone: 'UTC';
+    totals: AnalyticsTotals;
+    byModel: AnalyticsModelRow[];
+    byDay: AnalyticsDayRow[];
+}
+export interface AnalyticsExport {
+    filename: string;
+    csv: string;
+}
+export type AnalyticsFailureReason = 'invalid-query' | 'unknown-account' | 'missing-credential' | 'credential-unavailable' | 'unsupported-gateway' | 'invalid-proxy' | 'permission-denied' | 'upstream' | 'network' | 'timeout' | 'invalid-response';
 /**
- * Validate one query. Unknown fields are ignored so a newer client can add
- * optional knobs without breaking an older Host.
+ * Validate one account-scoped official history query.
  * @param value - raw RPC argument.
  * @returns the validated query.
  */
 export declare function parseAnalyticsQuery(value: unknown): AnalyticsQuery;
-/** Check the response envelope; the host constructs typed aggregate rows. */
+/** Keep the browser wire response limited to validated aggregate fields. */
 export declare function parseAnalyticsReport(value: unknown): AnalyticsReport;
+export declare function parseAnalyticsExport(value: unknown): AnalyticsExport;
 declare module '@deepseek-ai/dsh-typert-protocol' {
     interface RemoteErrorDetailsMap {
         'opencode-go/analytics-unavailable': {
             readonly reason: AnalyticsFailureReason;
             readonly retryable: boolean;
+            readonly retainPrevious?: boolean;
+            readonly source?: string;
         };
     }
     interface TypertRemoteNamespaceMap {
         opencodeGoAnalytics: {
             read(query: AnalyticsQuery, signal?: AbortSignal): Promise<RemoteResult<AnalyticsReport>>;
+            exportCsv(query: AnalyticsQuery, signal?: AbortSignal): Promise<RemoteResult<AnalyticsExport>>;
         };
     }
 }

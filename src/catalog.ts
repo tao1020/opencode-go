@@ -29,6 +29,7 @@ import {
   type GoModelCatalog,
   DISPLAY_NAME,
   SDK_PROVIDER_ID,
+  MAX_THINKING_BUDGET_TOKENS,
   assertProxyURL,
 } from './contracts.ts'
 import { randomUUID } from 'node:crypto'
@@ -59,21 +60,57 @@ export function supportsThinkingBudget(api: Api, compat: Model<Api>['compat']): 
 
 export function reasoningBudgetRange(model: Model<Api>): ThinkingBudgetRange | undefined {
   if (!model.reasoning || !model.reasoningBudget) return undefined
-  return { min: model.reasoningBudget.min, max: Math.min(model.reasoningBudget.max, model.maxTokens - 1024) }
+  const max = Math.min(model.reasoningBudget.max, model.maxTokens - 1024)
+  // A gateway declaring a ceiling below the floor (or a model too small for the
+  // floor) has no usable numeric budget; omit the control instead of throwing
+  // later, which would make the whole model unresolvable.
+  return max >= model.reasoningBudget.min ? { min: model.reasoningBudget.min, max } : undefined
 }
 
 export function unsupportedThinkingLevels(): ThinkingLevelMap {
   return Object.fromEntries(THINKING_LEVELS.map(level => [level, null]))
 }
 
-export function reasoningChoices(model: Model<Api>): readonly { id: string; name: string }[] {
-  if (!model.reasoning) return []
-  const range = reasoningBudgetRange(model)
-  const presets = model.reasoningBudgetPresets ?? []
-  const valid = (tokens: number): boolean => range !== undefined && Number.isSafeInteger(tokens) && tokens >= range.min && tokens <= range.max
-  if (range && presets.some(tokens => !valid(tokens))) {
-    throw new LlmError(`opencode-go model "${model.id}" thinking budgets must be integers between ${range.min} and ${range.max} tokens`, 'INVALID_REQUEST')
+/** Explain one configured thinking budget that was dropped instead of applied. */
+function ignoredBudgetReason(model: Model<Api>, tokens: number, range: ThinkingBudgetRange | undefined): string {
+  const value = Number.isFinite(tokens) ? String(tokens) : 'non-numeric'
+  if (tokens > MAX_THINKING_BUDGET_TOKENS) {
+    return `configured thinking budget ${value} is ignored: it exceeds the ${MAX_THINKING_BUDGET_TOKENS}-token cap`
   }
+  if (range === undefined) {
+    return `configured thinking budget ${value} is ignored: model "${model.id}" exposes no usable numeric thinking budget`
+  }
+  return `configured thinking budget ${value} is ignored: model "${model.id}" accepts ${range.min}-${range.max} tokens`
+}
+
+/**
+ * Selectable reasoning choices, configured budgets included. Configured budgets
+ * are user data: unusable entries (outside the model's range, non-integers or
+ * above {@link MAX_THINKING_BUDGET_TOKENS}) are dropped rather than throwing,
+ * so a stale setting can never make its model unresolvable. `onWarning`
+ * receives one explanation per dropped entry so the Host can surface it.
+ * @param model - model whose selectable reasoning controls are resolved.
+ * @param onWarning - optional observer for each ignored configured budget.
+ * @returns the selectable thinking choices in display order.
+ */
+export function reasoningChoices(model: Model<Api>, onWarning?: (reason: string) => void): readonly { id: string; name: string }[] {
+  if (!model.reasoning) {
+    // A configured budget on a model without reasoning controls cannot apply;
+    // report it once so a stale profile is visible instead of silently inert.
+    for (const tokens of new Set(model.reasoningBudgetPresets ?? [])) {
+      onWarning?.(`configured thinking budget ${Number.isFinite(tokens) ? String(tokens) : 'non-numeric'} is ignored: model "${model.id}" exposes no reasoning controls`)
+    }
+    return []
+  }
+  const range = reasoningBudgetRange(model)
+  const valid = (tokens: number): boolean => range !== undefined && Number.isSafeInteger(tokens)
+    && tokens >= range.min && tokens <= range.max && tokens <= MAX_THINKING_BUDGET_TOKENS
+  const presets: number[] = []
+  for (const tokens of new Set(model.reasoningBudgetPresets ?? [])) {
+    if (valid(tokens)) presets.push(tokens)
+    else onWarning?.(ignoredBudgetReason(model, tokens, range))
+  }
+  presets.sort((a, b) => a - b)
   if (range && model.reasoningControl === 'budget') {
     const choices: { id: string; tokens: number }[] = Object.entries(BUDGET_PRESETS).filter(([, tokens]) => valid(tokens))
       .map(([id, tokens]) => ({ id, tokens }))
@@ -90,7 +127,7 @@ export function reasoningChoices(model: Model<Api>): readonly { id: string; name
     // Keep the durable high ID of the old switch, but describe its actual meaning.
     name: model.reasoningControl === 'toggle' && id === 'high' ? 'On'
       : `${id.charAt(0).toUpperCase()}${id.slice(1)}`,
-  })), ...range === undefined ? [] : [...new Set(presets)].sort((a, b) => a - b)
+  })), ...range === undefined ? [] : presets
     .map(tokens => ({ id: `budget:${tokens}`, name: `${tokens.toLocaleString('en-US')} tokens` }))]
 }
 
@@ -101,13 +138,37 @@ export type ReasoningIntent =
   | { kind: 'effort'; level: Exclude<ModelThinkingLevel, 'off'> }
   | { kind: 'budget'; tokens: number; min: number }
 
-/** Called after validation against the model's choices. */
-export function reasoningIntent(model: Model<Api>, level: string | undefined): ReasoningIntent {
+/** Clamp a stale or malformed budget selection into the model's usable range. */
+function clampThinkingBudget(range: ThinkingBudgetRange, requested: number | undefined): number {
+  if (requested === undefined || !Number.isFinite(requested)) return range.min
+  return Math.min(Math.max(Math.round(requested), range.min), range.max)
+}
+
+/**
+ * Called after validation against the model's choices.
+ * @param model - model that owns the selection.
+ * @param level - selected effort id (effort, toggle, off or `budget:N`).
+ * @param onWarning - optional observer for one clamped stale budget selection.
+ * @returns the serialization intent for the selection.
+ */
+export function reasoningIntent(model: Model<Api>, level: string | undefined, onWarning?: (reason: string) => void): ReasoningIntent {
   if (level === undefined) return { kind: 'default' }
   if (level === 'off') return { kind: 'off' }
   const range = reasoningBudgetRange(model)
-  if (range && (model.reasoningControl === 'budget' || level.startsWith('budget:'))) return { kind: 'budget', min: range.min,
-    tokens: level.startsWith('budget:') ? Number(level.slice(7)) : BUDGET_PRESETS[level as keyof typeof BUDGET_PRESETS] }
+  if (range && (model.reasoningControl === 'budget' || level.startsWith('budget:'))) {
+    const requested = level.startsWith('budget:') ? Number(level.slice(7))
+      : BUDGET_PRESETS[level as keyof typeof BUDGET_PRESETS] as number | undefined
+    // A persisted selection can outlive the catalog or its configured presets;
+    // degrade to the nearest usable budget instead of failing the request, and
+    // report the clamp so a stale setting is visible instead of silent.
+    const usable = requested !== undefined && Number.isSafeInteger(requested)
+      && requested >= range.min && requested <= range.max
+    const tokens = usable ? requested : clampThinkingBudget(range, requested)
+    if (!usable) {
+      onWarning?.(`selected thinking budget ${requested === undefined ? 'unavailable' : String(requested)} was clamped to ${tokens} tokens for model "${model.id}"`)
+    }
+    return { kind: 'budget', min: range.min, tokens }
+  }
   return model.reasoningControl === 'toggle' ? { kind: 'on' }
     : { kind: 'effort', level: level as Exclude<ModelThinkingLevel, 'off'> }
 }
@@ -493,6 +554,9 @@ export class OpencodeGoCatalog {
         method: 'GET', cache: 'no-cache', headers: { ...attributionHeaders(), accept: 'application/json',
           ...this.cached?.etag === undefined ? {} : { 'if-none-match': this.cached.etag } },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        // Discovery is unauthenticated but must not be steered elsewhere: a
+        // redirect to loopback or a metadata address is a failure, not a source.
+        redirect: 'error',
       }, MODEL_LISTING_MAX_BYTES, 'gzip', this.fetcher)
       const notModified = response.status === 304 && this.cached !== undefined
       if (!notModified && !response.ok) throw new LlmError(`HTTP ${response.status}`, 'DISCOVERY_FAILED')
@@ -511,7 +575,7 @@ export class OpencodeGoCatalog {
       const failure = new LlmError(`could not refresh ${diagnosticURL(this.url)}: ${detail}`, 'DISCOVERY_FAILED', { cause: error })
       snapshot = { ...(this.served ?? this.empty()), live: false, failure, fetchedAtMs: Date.now() }
       this.failures = Math.min(this.failures + 1, 5)
-      try { this.onFallback({ url: this.url, error: failure, kept: snapshot.models.size }) } catch { /* Diagnostics cannot reject discovery. */ }
+      try { this.onFallback({ url: diagnosticURL(this.url), error: failure, kept: snapshot.models.size }) } catch { /* Diagnostics cannot reject discovery. */ }
     }
     this.served = snapshot
     this.refreshAtMs = snapshot.fetchedAtMs + (this.failures === 0 ? this.refreshMs : Math.min(this.refreshMs, 5000 * 2 ** (this.failures - 1), 60_000))
@@ -553,8 +617,15 @@ function describeCatalog(snapshot: CatalogSnapshot): GoModel[] {
   ].map(model => ({ ...model, source: snapshot.source, ...snapshot.details.get(model.id) })))
 }
 
-export async function discoverCatalogModels(catalog: OpencodeGoCatalog): Promise<readonly LlmDiscoveredModel[]> {
-  const snapshot = await catalog.snapshot(true)
+/**
+ * Discover one catalog source's models, forced through the shared refresh.
+ * @param catalog - source catalog to interrogate.
+ * @param signal - optional caller cancellation. Only this waiter is cancelled;
+ *   the shared refresh keeps running for other readers and the next discovery.
+ * @returns the discovered models for the source.
+ */
+export async function discoverCatalogModels(catalog: OpencodeGoCatalog, signal?: AbortSignal): Promise<readonly LlmDiscoveredModel[]> {
+  const snapshot = await catalog.snapshot(true, signal)
   if (!snapshot.live) throw listingError(snapshot)
   return describeCatalog(snapshot).map(({ id, name, contextWindow, maxTokens }) => ({ id,
     name: snapshot.unavailable.has(id) ? `${id} (configuration unavailable: ${snapshot.unavailable.get(id)})` : name,
@@ -600,7 +671,8 @@ export class GoCatalogManager {
 export class GoModelsService extends TypertRemoteService {
   constructor(ctx: Context, private readonly options: {
     catalog: () => OpencodeGoCatalog
-    freeCatalog?: () => OpencodeGoCatalog
+    /** Absent while the Free channel is disabled; the directory then omits Free models. */
+    freeCatalog?: () => OpencodeGoCatalog | undefined
     onRefresh?: () => void
   }) { super(ctx, 'opencodeGoModels') }
 

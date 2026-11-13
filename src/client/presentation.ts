@@ -1,5 +1,6 @@
-/** English and Chinese copy, palette tokens and local theme preferences. */
-import { useEffect, useState, useSyncExternalStore, type CSSProperties } from 'react'
+/** English and Chinese copy and the shared Native/Classic presentation tokens. */
+import { useEffect, useState, type CSSProperties } from 'react'
+import { DEFAULT_OPENCODE_GO_THEME, type OpencodeGoTheme } from '../contracts.ts'
 
 /** Copy dictionaries for the OpenCode Go settings page. English is the key-set source of truth. */
 
@@ -31,6 +32,8 @@ export const en = {
   accountSwitchBack: 'Back to usage',
   accountSwitchHint: 'This account moves to the first position and serves later requests in this profile. The other accounts keep their relative order.',
   accountSwitchFailed: 'Could not switch account. Please retry.',
+  sidebarNextAccount: 'View the next account’s quota',
+  sidebarAnalytics: 'Open usage history',
   accountFallbackQuota: 'The current account reached its quota; switched to',
   accountFallbackCredential: 'The current key was unavailable or rejected; switched to',
   accountsSummary: '{count} accounts · Current {name}',
@@ -46,7 +49,7 @@ export const en = {
   usageResetDays: 'resets in {days} d',
   usageResetDue: 'resets now',
   usageResetUnknown: 'reset time unknown',
-  usageTitle: 'OpenCode Go usage',
+  usageTitle: 'OpenCode Go quota',
   usageRollingShort: '5h',
   usageWeekShort: 'week',
   usage_rolling: '5 hours',
@@ -62,88 +65,77 @@ export const en = {
   usageRefreshFailed: 'Refresh failed',
   usageLastUpdated: 'Last updated',
   usageRetry: 'Retry now',
+  usageRefresh: 'Refresh quota',
   usageRefreshing: 'Refreshing…',
-  analyticsOpen: 'Usage analytics',
-  analyticsTitle: 'Usage analytics',
-  analyticsSubtitle: 'This plugin’s requests · includes closed sessions · estimates, not an invoice',
-  analyticsClose: 'Close usage analytics',
+  analyticsOpen: 'Usage history',
+  analyticsTitle: 'Usage history',
+  analyticsSubtitle: 'All workspace clients · UTC calendar days',
+  analyticsClose: 'Close usage history',
   analyticsRange: 'Date range',
   analyticsRangeToday: 'Today',
   analyticsRange7d: '7 days',
   analyticsRange30d: '30 days',
   analyticsRange90d: '90 days',
-  analyticsRefresh: 'Refresh',
-  analyticsRetry: 'Retry',
-  analyticsLoading: 'Scanning local sessions…',
-  analyticsEmpty: 'No requests from this plugin in the selected range.',
-  analyticsUnsupported: 'This DSH version cannot read local session history.',
-  analyticsFailed: 'Could not read usage analytics.',
+  analyticsAccount: 'Viewing account',
+  analyticsNoAccounts: 'Add an account to view workspace history.',
+  analyticsRefresh: 'Refresh history',
+  analyticsRetry: 'Try again',
+  analyticsLoading: 'Loading official workspace history…',
+  analyticsEmpty: 'No recorded usage in this range.',
+  analyticsFailed: 'Could not load workspace history.',
+  analyticsRefreshed: 'Updated',
+  analyticsRefreshing: 'Refreshing official history…',
+  analyticsStale: 'Refresh failed. Showing the last successful result for this account and range.',
   analyticsRequests: 'Requests',
   analyticsTokens: 'Tokens',
-  analyticsSpend: 'Estimated spend',
-  analyticsCoverage: 'Coverage',
-  analyticsSessions: 'sessions',
-  analyticsSeconds: 'scan',
-  analyticsSummaries: 'summaries',
-  analyticsUnsettled: 'unsettled',
-  analyticsByModel: 'By model',
-  analyticsByDay: 'By day',
-  analyticsInput: 'in',
-  analyticsOutput: 'out',
-  analyticsCacheRead: 'cache',
-  analyticsPriced: 'priced',
-  analyticsUnpriced: 'unpriced',
-  analyticsMissing: 'missing usage',
-  analyticsFailedSessions: 'unreadable',
-  analyticsUnattributed: 'Unattributed activity:',
-  analyticsUnread: 'Sessions left unread at the budget or cap:',
-  analyticsScanSegments: 'Time spent in ms, list / scan / pricing:',
-  analyticsStaleResults: 'Showing the previous scan; the new one is running.',
-  analyticsTruncated: 'Only the most recent history was scanned.',
-  analyticsScanMore: 'Scan more history',
-  analyticsPriceSource: 'Prices:',
-  analyticsNotInvoice: 'Estimates are not an invoice; official percentages remain authoritative; spend applies current OpenCode /models prices across all history.',
-  analyticsPricingUnavailable: 'prices unavailable',
-  analyticsLegacy: 'Includes pre-0.1.16 route requests:',
-  analyticsCardTitle: 'Usage analytics',
-  analyticsCardHint: 'Requests from this plugin, including closed sessions, with per-model cost estimates. Opening scans local sessions; nothing is uploaded.',
-  analyticsBoardLabel: 'Dashboard',
-  analyticsOpenBoard: 'Open dashboard',
-  analyticsQuota: 'Quota',
-  analyticsQuotaHint: 'Official percentages · refreshed every minute',
-  analyticsQuotaFailed: 'Quota is temporarily unavailable; usage statistics are still shown.',
-  analyticsChartSpend: 'Cost',
-  analyticsChartTokens: 'Tokens',
-  analyticsKicker: 'Usage report',
-  analyticsLead: 'In the selected range, this plugin made {requests} requests, used {tokens} tokens and an estimated {spend}.',
-  analyticsLeadTop: '{model} accounts for {share} of that estimate.',
-  analyticsComposition: 'Spend composition',
-  analyticsCompositionHint: 'Estimated amount · priced models only',
-  analyticsCompositionOther: 'Other {count}',
-  analyticsCompositionFree: 'Also free or unpriced:',
+  analyticsSpend: 'Usage amount',
+  analyticsCacheHit: 'Cache hit rate',
+  analyticsInput: 'Input',
+  analyticsOutput: 'Output',
+  analyticsCacheRead: 'Cache read',
+  analyticsCacheWrite: 'Cache write',
+  analyticsDailyAverage: 'Daily average',
+  analyticsModels: 'models',
+  analyticsActiveDays: 'active days',
+  analyticsPerDay: 'day',
+  analyticsByDay: 'Daily activity',
+  analyticsTrendHint: 'Select a day to inspect its usage.',
+  analyticsTokensMode: 'Token breakdown',
+  analyticsRequestsMode: 'Request count',
+  analyticsChartHelp: 'Arrow keys move between days. Click or tap to pin a day; Escape clears it.',
+  analyticsSelectDay: 'Hover, focus or tap a bar for daily details.',
+  analyticsByModel: 'Model distribution',
+  analyticsRankingHint: 'Compare models across this workspace.',
+  analyticsDetails: 'Model details',
   analyticsModel: 'Model',
-  analyticsCost: 'Cost',
-  analyticsShare: 'Share',
-  analyticsCacheHit: 'cache hit',
-  analyticsDailyAverage: 'Daily avg',
-  analyticsPeak: 'Peak',
-  analyticsTotal: 'Total',
-  themeLabel: 'Theme',
-  themeSilentBlack: 'Silent Black',
-  themeGraphite: 'Graphite',
-  themeSeaSalt: 'Sea Salt',
-  themeWarmSand: 'Warm Sand',
-  themeHint: 'Applies to the pill and the dashboard only.',
+  analyticsShare: 'Token share',
+  analyticsAllModels: 'Show all models',
+  analyticsFewerModels: 'Show fewer models',
+  analyticsExport: 'Export CSV',
+  analyticsExporting: 'Exporting…',
+  analyticsExportFailed: 'Could not export this range. Please retry.',
+  analyticsPermission: 'This key cannot read history. Check its Usage read permission in OpenCode Console.',
+  analyticsCredentials: 'The selected account has no usable key. Update it in account settings.',
+  analyticsUnsupported: 'History is available for the official OpenCode gateway. This account uses another gateway.',
+  analyticsPending: 'OpenCode is still preparing daily summaries. Please try again shortly.',
+  analyticsInvalid: 'OpenCode returned an unreadable history response. Please retry.',
+  analyticsQuota: 'Current allowance',
+  analyticsQuotaFailed: 'Allowance unavailable',
+  analyticsAmountHint: 'Official usage amount is not a receipt or an extra charge for Go.',
+  analyticsLagHint: 'Daily summaries may lag recent requests. Anonymous Free usage may not appear.',
+  analyticsExportHint: 'CSV includes member and service-account fields supplied by Console.',
+  analyticsKicker: 'OpenCode Console',
   nav: 'OpenCode Go',
   title: 'OpenCode Go',
   titleLabel: 'OpenCode Go',
   intro: 'Choose the OpenCode Go and platform free models shown in conversations and adjust their capacities.',
   starProject: 'Enjoying the plugin? Star it on GitHub',
   starProjectTitle: 'Open the GitHub project in a new tab',
-  enabledLabel: 'Enable OpenCode Go and Free',
-  enabledHint: 'Enables the Free route; Go also requires a usable API key. Turning this off withdraws both routes immediately.',
-  enabledOff: 'OpenCode Go and Free are off: their models are withdrawn from every picker.',
+  enabledLabel: 'Enable OpenCode Go',
+  enabledHint: 'Adds OpenCode Go models to conversations. The Free channel below has its own switch and also requires this one.',
+  enabledOff: 'OpenCode Go is off: its models are withdrawn from every picker.',
   enabledUnavailable: 'This deployment pins the switch on in its composition, so it cannot be changed here.',
+  enabledFailed: 'Could not update the OpenCode Go switch. Please retry.',
   keyLabel: 'API key',
   keyHint: 'From your OpenCode Go subscription (opencode.ai). Leaving this blank keeps the key already saved, and a saved key applies to the next request without a restart.',
   keyConfigured: 'Key saved',
@@ -151,8 +143,8 @@ export const en = {
   keyNotWritable: 'This key is supplied from outside the settings document (an environment variable, for example), so it cannot be changed here.',
   modelsLabel: 'Available models',
   modelSourcesLabel: 'Model source',
-  modelsGoTab: 'OpenCode Go models',
-  modelsFreeTab: 'OpenCode platform free models',
+  modelsGoTab: 'OpenCode Go',
+  modelsFreeTab: 'Free models',
   modelsGoSource: 'Go model source',
   modelsFreeSource: 'Free model source',
   modelsRefresh: 'Refresh',
@@ -164,6 +156,7 @@ export const en = {
   modelsSourceNeverFetched: 'No successful fetch yet',
   modelsSourceUpdated: 'Last successful check: {time}',
   modelsRefreshing: 'Refreshing… Keeping the last fetched models visible.',
+  modelsRefreshingShort: 'Updating…',
   modelsEmpty: 'The gateway currently serves no model this adapter can route.',
   limitsLabel: 'Model capacities',
   limitsHint: 'Capacities come from the online configuration; blank keeps the default and Save applies your overrides.',
@@ -179,6 +172,7 @@ export const en = {
   thinkingBudgetAdd: 'Add',
   thinkingBudgetRemove: 'Remove {value} token budget',
   capacityDefault: 'Default: {value} tokens',
+  capacityDefaultCapped: 'Default: {value} tokens (catalog max: {max} tokens)',
   capacityMissing: 'API did not provide a value',
   modalityLabel: 'Input modalities',
   modalityText: 'Text',
@@ -189,7 +183,7 @@ export const en = {
   modalityUnknown: 'Not declared',
   modalitiesSource: 'Input modalities come from the online /models configuration.',
   modalitiesForwarding: 'This plugin converts and forwards image attachments only.',
-  visibilityHint: 'Only enabled models appear in conversation pickers. Changes apply immediately. Deprecated models are off by default and can be enabled individually.',
+  visibilityHint: 'Model switches apply immediately. Save to apply capacity changes.',
   modelVisibleLabel: 'Show {name} in conversations',
   configurationMissing: 'Configuration missing',
   configurationMissingHint: 'The gateway lists this model, but no usable OpenCode Go configuration is available. Once the upstream configuration is supplied or corrected, refresh the list to enable it.',
@@ -212,15 +206,38 @@ export const en = {
   limitsEmpty: 'Read the model list first; capacities are edited per model the gateway serves.',
   limitsContextLabel: 'Context window for {name}',
   limitsOutputLabel: 'Max output for {name}',
-  advancedResetAll: 'Reset all to defaults',
+  advancedResetAll: 'Reset parameter defaults',
   advancedLabel: 'Advanced settings',
   groupUsage: 'Usage settings',
+  groupFree: 'Free channel',
+  freeEnabledLabel: 'Enable the Free channel',
+  freeEnabledHint: 'Off by default. When enabled, the Free route reuses a saved account key; without a usable key it falls back to anonymous public access, and requests are sent with the official OpenCode CLI user agent. This may violate upstream terms or trigger rate limiting or risk controls.',
+  settingsTabsLabel: 'Settings sections',
+  settingsTabOverview: 'Overview',
+  settingsTabModels: 'Models',
+  settingsTabAppearance: 'Appearance',
+  settingsTabAdvanced: 'Advanced settings',
+  usageAppearanceLabel: 'Appearance',
+  usageAppearanceReset: 'Reset appearance',
+  appearanceThemeLabel: 'Interface theme',
+  appearanceThemeHint: 'DSH Native follows the Host and third-party themes through their public tokens. OpenCode Go Classic keeps the plugin’s warm paper, terracotta and serif style.',
+  appearanceThemePreviewHint: 'Preview both themes below. Save to apply your choice to every OpenCode Go surface.',
+  appearanceTheme_native: 'DSH Native (default)',
+  appearanceTheme_classic: 'OpenCode Go Classic',
+  showSidebarQuotaLabel: 'Show quota in the sidebar',
+  showSidebarQuotaSummary: 'View account quotas in the sidebar, independently of the input indicator.',
+  showSidebarQuotaHint: 'Shows a quota card in the expanded sidebar and an icon when collapsed. Click the account name to cycle through account quotas without changing request order; the viewed account is remembered on this device. Refreshes every minute, independently of the input indicator.',
+  usagePillStyleLabel: 'Input quota style',
+  usagePillStyleHint: 'Choose a bordered badge or a plain, transparent quota indicator in the conversation input.',
+  usagePillStylePreviewHint: 'Sample usage is shown below. Save to apply your chosen style.',
+  usagePillStyle_badge: 'Badge (default)',
+  usagePillStyle_plain: 'Plain',
   groupConnection: 'Connection',
   groupCacheTimeouts: 'Cache and timeouts',
   groupImages: 'Image handling',
   advancedHint: 'The inherited values work as they are; below are only the settings you may need to change.',
   usageDisplayLabel: 'Usage display',
-  usageDisplayHint: 'Auto shows it only for Default models; Always keeps it visible with any model; Off hides it and stops polling. While visible it refreshes every minute.',
+  usageDisplayHint: 'Auto shows the input indicator only for DSH OpenCode Go models; Always keeps it visible with any model; Off hides it and stops its polling. While visible it refreshes every minute. The sidebar has its own switch.',
   usageDisplay_auto: 'Auto (default)',
   usageDisplay_always: 'Always',
   usageDisplay_off: 'Off',
@@ -235,6 +252,10 @@ export const en = {
   refreshMinutesHint: 'How long the model catalog is cached; opening this page or refreshing re-checks it immediately.',
   streamIdleTimeoutMsLabel: 'Stream idle timeout (ms)',
   streamIdleTimeoutMsHint: 'The longest silence between stream events; a longer gap fails the request.',
+  requestPreparationTimeoutMsLabel: 'Request preparation timeout (ms)',
+  requestPreparationTimeoutMsHint: 'Bounds route discovery and each attempt\'s credential and image preparation before dispatch.',
+  requestTimeoutMsLabel: 'Request timeout (ms)',
+  requestTimeoutMsHint: 'The whole dispatch deadline, including discovery, image preparation and account fallback.',
   maxImagesLabel: 'Request image count cap (maxImages)',
   maxImagesHint: 'Leave empty to inherit the base configuration (uncapped only when the base sets none); above the cap the oldest images become text placeholders.',
   maxRequestImageBytesLabel: 'Request image payload cap (bytes)',
@@ -251,6 +272,7 @@ export const en = {
   saving: 'Saving…',
   savedFailed: 'The last save did not land as staged; correct the values or discard.',
   readOnly: 'The settings document is read-only in this deployment.',
+  settingsLoading: 'Reading the OpenCode Go settings…',
   unavailable: 'The OpenCode Go settings are not served in this deployment.',
 }
 
@@ -283,6 +305,8 @@ export const zh: typeof en = {
   accountSwitchBack: '返回额度',
   accountSwitchHint: '切换后，该账号移至首位，供本 profile 的后续请求使用；其他账号的相对顺序保持不变。',
   accountSwitchFailed: '账号切换未生效，请重试。',
+  sidebarNextAccount: '查看下一个账号的额度',
+  sidebarAnalytics: '打开用量历史',
   accountFallbackQuota: '当前账号额度耗尽，已自动切换为：',
   accountFallbackCredential: '当前 Key 不可用或被拒绝，已自动切换为：',
   accountsSummary: '{count} 个 · 当前 {name}',
@@ -298,7 +322,7 @@ export const zh: typeof en = {
   usageResetDays: '{days} 天后重置',
   usageResetDue: '即将重置',
   usageResetUnknown: '重置时间未知',
-  usageTitle: 'OpenCode Go 用量',
+  usageTitle: 'OpenCode Go 额度',
   usageRollingShort: '5小时',
   usageWeekShort: '周',
   usage_rolling: '5 小时',
@@ -314,88 +338,77 @@ export const zh: typeof en = {
   usageRefreshFailed: '刷新失败',
   usageLastUpdated: '更新于',
   usageRetry: '立即重试',
+  usageRefresh: '刷新额度',
   usageRefreshing: '正在刷新…',
-  analyticsOpen: '用量统计',
-  analyticsTitle: '用量统计',
-  analyticsSubtitle: '本插件请求 · 含已关闭会话 · 估算金额非账单',
-  analyticsClose: '关闭用量统计',
+  analyticsOpen: '用量历史',
+  analyticsTitle: '用量历史',
+  analyticsSubtitle: '包含工作区内所有客户端 · 按 UTC 日统计',
+  analyticsClose: '关闭用量历史',
   analyticsRange: '时间范围',
   analyticsRangeToday: '今天',
   analyticsRange7d: '7 天',
   analyticsRange30d: '30 天',
   analyticsRange90d: '90 天',
-  analyticsRefresh: '刷新',
+  analyticsAccount: '查看账号',
+  analyticsNoAccounts: '添加账号后即可查看工作区的用量历史。',
+  analyticsRefresh: '刷新历史',
   analyticsRetry: '重试',
-  analyticsLoading: '正在扫描本地会话…',
-  analyticsEmpty: '所选区间内没有本插件的请求。',
-  analyticsUnsupported: '当前 DSH 版本无法读取本地会话历史。',
-  analyticsFailed: '未能读取用量统计。',
-  analyticsRequests: '请求',
+  analyticsLoading: '正在读取官方工作区历史…',
+  analyticsEmpty: '所选区间暂无已记录的用量。',
+  analyticsFailed: '无法读取工作区用量历史。',
+  analyticsRefreshed: '更新于',
+  analyticsRefreshing: '正在刷新官方历史…',
+  analyticsStale: '刷新失败，以下为当前账号与区间上次成功读取的结果。',
+  analyticsRequests: '请求数',
   analyticsTokens: 'Token',
-  analyticsSpend: '估算花费',
-  analyticsCoverage: '覆盖',
-  analyticsSessions: '个会话',
-  analyticsSeconds: '扫描',
-  analyticsSummaries: '压缩摘要',
-  analyticsUnsettled: '未结算',
-  analyticsByModel: '按模型',
-  analyticsByDay: '按天',
+  analyticsSpend: '用量金额',
+  analyticsCacheHit: '缓存命中率',
   analyticsInput: '输入',
   analyticsOutput: '输出',
-  analyticsCacheRead: '缓存',
-  analyticsPriced: '已计价',
-  analyticsUnpriced: '未计价',
-  analyticsMissing: '缺用量',
-  analyticsFailedSessions: '读取失败',
-  analyticsUnattributed: '未归属活动：',
-  analyticsUnread: '预算或上限截止时未读取的会话：',
-  analyticsScanSegments: '耗时毫秒，列表 / 扫描 / 定价：',
-  analyticsStaleResults: '以下为上一轮结果，新一轮扫描进行中。',
-  analyticsTruncated: '仅扫描了最近的部分历史。',
-  analyticsScanMore: '扫描更多历史',
-  analyticsPriceSource: '价格来源：',
-  analyticsNotInvoice: '估算金额非账单；官方额度百分比仍为权威值；费用按当前 /models 价目对全部历史请求估算。',
-  analyticsPricingUnavailable: '价格暂不可用',
-  analyticsLegacy: '含 0.1.16 之前的旧路由请求：',
-  analyticsCardTitle: '用量统计',
-  analyticsCardHint: '统计本插件的请求（含已关闭会话），按模型估算金额。打开时扫描本地会话，不上传。',
-  analyticsBoardLabel: '看板',
-  analyticsOpenBoard: '打开看板',
-  analyticsQuota: '额度',
-  analyticsQuotaHint: '官方百分比 · 每分钟刷新',
-  analyticsQuotaFailed: '额度暂不可用，统计结果仍会显示。',
-  analyticsChartSpend: '金额',
-  analyticsChartTokens: 'Token',
-  analyticsKicker: '用量报告',
-  analyticsLead: '所选区间内，本插件发起了 {requests} 次请求，消耗 {tokens} Token，估算 {spend}。',
-  analyticsLeadTop: '其中 {model} 占 {share}。',
-  analyticsComposition: '花费构成',
-  analyticsCompositionHint: '按估算金额 · 仅含已计价模型',
-  analyticsCompositionOther: '其他 {count}',
-  analyticsCompositionFree: '另有免费或未计价模型：',
-  analyticsModel: '模型',
-  analyticsCost: '花费',
-  analyticsShare: '占比',
-  analyticsCacheHit: '缓存命中',
+  analyticsCacheRead: '缓存读',
+  analyticsCacheWrite: '缓存写',
   analyticsDailyAverage: '日均',
-  analyticsPeak: '峰值',
-  analyticsTotal: '合计',
-  themeLabel: '主题',
-  themeSilentBlack: '寂静黑',
-  themeGraphite: '石墨',
-  themeSeaSalt: '海盐青',
-  themeWarmSand: '暖砂',
-  themeHint: '仅作用于额度胶囊和用量看板。',
+  analyticsModels: '个模型',
+  analyticsActiveDays: '个活跃日',
+  analyticsPerDay: '天',
+  analyticsByDay: '每日活动',
+  analyticsTrendHint: '选择一天，查看当日用量。',
+  analyticsTokensMode: 'Token 构成',
+  analyticsRequestsMode: '请求数',
+  analyticsChartHelp: '方向键切换日期；点击或轻触固定一天，Escape 取消选择。',
+  analyticsSelectDay: '悬停、聚焦或轻触柱形，查看当日明细。',
+  analyticsByModel: '模型用量分布',
+  analyticsRankingHint: '比较工作区内各模型的消耗。',
+  analyticsDetails: '模型明细',
+  analyticsModel: '模型',
+  analyticsShare: 'Token 占比',
+  analyticsAllModels: '展开全部模型',
+  analyticsFewerModels: '收起模型',
+  analyticsExport: '导出 CSV',
+  analyticsExporting: '正在导出…',
+  analyticsExportFailed: '导出失败，请重试。',
+  analyticsPermission: '该 Key 无法读取历史，请在 OpenCode Console 检查 Usage 读取权限。',
+  analyticsCredentials: '所选账号没有可用 Key，请在账号设置中更新。',
+  analyticsUnsupported: '历史查询仅支持 OpenCode 官方网关，当前账号使用了其他网关。',
+  analyticsPending: 'OpenCode 尚未生成每日汇总，请稍后重试。',
+  analyticsInvalid: 'OpenCode 返回的历史数据无法解析，请重试。',
+  analyticsQuota: '当前额度',
+  analyticsQuotaFailed: '额度暂不可用',
+  analyticsAmountHint: '官方用量金额不等同账单或 Go 套餐外的实际扣款。',
+  analyticsLagHint: '每日汇总可能延迟，匿名 Free 调用可能不在其中。',
+  analyticsExportHint: 'CSV 包含 Console 提供的成员和服务账号字段。',
+  analyticsKicker: 'OpenCode Console',
   nav: 'OpenCode Go',
   title: 'OpenCode Go',
   titleLabel: 'OpenCode Go',
   intro: '分别选择会话中显示的 OpenCode Go 与平台免费模型，并调整其容量。',
   starProject: '喜欢这个插件？去 GitHub 点个 Star',
   starProjectTitle: '在新标签页打开 GitHub 项目',
-  enabledLabel: '启用 OpenCode Go 与 Free',
-  enabledHint: '开启后启用 Free 路由；Go 路由还需要可用的 API Key。关闭后立即撤下两个路由。',
-  enabledOff: 'OpenCode Go 与 Free 已关闭：两个路由的模型均已从选择器撤下。',
+  enabledLabel: '启用 OpenCode Go',
+  enabledHint: '开启后会将 OpenCode Go 模型加入会话。下方「免费通道」单独开关，同样需要此开关开启。',
+  enabledOff: 'OpenCode Go 已关闭：其模型已从所有选择器撤下。',
   enabledUnavailable: '此部署在组合层固定开启了该开关，无法在此修改。',
+  enabledFailed: 'OpenCode Go 开关未更新，请重试。',
   keyLabel: 'API key',
   keyHint: '来自你的 OpenCode Go 订阅（opencode.ai）。留空表示保持已保存的 key；保存后下一次请求即生效，无需重启。',
   keyConfigured: '已配置 key',
@@ -403,8 +416,8 @@ export const zh: typeof en = {
   keyNotWritable: '该 key 由设置文档之外的来源提供（例如环境变量），无法在此修改。',
   modelsLabel: '可用模型',
   modelSourcesLabel: '模型来源',
-  modelsGoTab: 'OpenCode Go 模型',
-  modelsFreeTab: 'OpenCode 平台免费模型',
+  modelsGoTab: 'OpenCode Go',
+  modelsFreeTab: '免费模型',
   modelsGoSource: 'Go 模型源',
   modelsFreeSource: 'Free 模型源',
   modelsRefresh: '刷新',
@@ -416,6 +429,7 @@ export const zh: typeof en = {
   modelsSourceNeverFetched: '尚未成功获取',
   modelsSourceUpdated: '上次成功检查：{time}',
   modelsRefreshing: '正在刷新，暂时保留上次获取的模型。',
+  modelsRefreshingShort: '更新中…',
   modelsEmpty: '网关当前没有本适配器可路由的模型。',
   limitsLabel: '模型容量',
   limitsHint: '容量来自在线模型配置；留空用默认值，保存后生效。',
@@ -431,6 +445,7 @@ export const zh: typeof en = {
   thinkingBudgetAdd: '添加',
   thinkingBudgetRemove: '移除 {value} token 预算',
   capacityDefault: '默认：{value} tokens',
+  capacityDefaultCapped: '默认：{value} tokens（模型上限：{max} tokens）',
   capacityMissing: 'API 未提供',
   modalityLabel: '输入模态',
   modalityText: '文本',
@@ -441,7 +456,7 @@ export const zh: typeof en = {
   modalityUnknown: '未声明',
   modalitiesSource: '输入模态来自 /models 的在线配置。',
   modalitiesForwarding: '本插件目前仅转换并转发图像附件。',
-  visibilityHint: '开启的模型才会显示在会话选择器中，修改立即生效。过时模型默认关闭，可单独开启。',
+  visibilityHint: '模型开关立即生效，容量调整后保存。',
   modelVisibleLabel: '在会话中显示 {name}',
   configurationMissing: '配置缺失',
   configurationMissingHint: '网关已列出此模型，但暂未获得可用的 OpenCode Go 配置。上游补齐或修正配置后，刷新列表即可开启。',
@@ -464,15 +479,38 @@ export const zh: typeof en = {
   limitsEmpty: '请先读取模型列表；容量按网关提供的模型逐个编辑。',
   limitsContextLabel: '{name} 的上下文窗口',
   limitsOutputLabel: '{name} 的最大输出',
-  advancedResetAll: '全部恢复默认',
+  advancedResetAll: '恢复参数默认值',
   advancedLabel: '高级设置',
   groupUsage: '用量设置',
+  groupFree: '免费通道',
+  freeEnabledLabel: '启用免费通道',
+  freeEnabledHint: '默认关闭。开启后，Free 路由复用已保存的账号 Key；没有可用 Key 时退回匿名公共访问，且请求以官方 OpenCode CLI 的 User-Agent 发出。这可能违反上游条款或触发限流/风控。',
+  settingsTabsLabel: '设置分区',
+  settingsTabOverview: '概览',
+  settingsTabModels: '模型',
+  settingsTabAppearance: '外观',
+  settingsTabAdvanced: '高级设置',
+  usageAppearanceLabel: '外观',
+  usageAppearanceReset: '恢复默认外观',
+  appearanceThemeLabel: '界面主题',
+  appearanceThemeHint: 'DSH Native 通过公开 token 跟随宿主和第三方主题；OpenCode Go Classic 保留插件自己的暖纸色、陶土色和衬线风格。',
+  appearanceThemePreviewHint: '下方可预览两种主题，保存后将选择应用到所有 OpenCode Go 界面。',
+  appearanceTheme_native: 'DSH Native（默认）',
+  appearanceTheme_classic: 'OpenCode Go Classic',
+  showSidebarQuotaLabel: '在侧边栏显示额度',
+  showSidebarQuotaSummary: '在侧边栏查看各账号额度，独立于输入栏显示。',
+  showSidebarQuotaHint: '侧边栏展开时显示额度卡片，收起时显示图标。点击账号名循环查看各账号额度，不改变请求顺序，并在本机记住查看对象。开启后每分钟刷新，独立于输入栏额度显示。',
+  usagePillStyleLabel: '输入栏额度样式',
+  usagePillStyleHint: '选择带边框的徽章，或无边框透明的精简额度样式。',
+  usagePillStylePreviewHint: '下方为示例额度，保存后应用所选样式。',
+  usagePillStyle_badge: '徽章（默认）',
+  usagePillStyle_plain: '精简',
   groupConnection: '连接',
   groupCacheTimeouts: '缓存与超时',
   groupImages: '图片处理',
   advancedHint: '继承来的取值即可正常使用；下面只列需要改的项。',
   usageDisplayLabel: '额度显示',
-  usageDisplayHint: '自动：仅选中 Default 模型时显示；常驻：任意模型都显示；关闭：隐藏并停止刷新。显示时每分钟刷新。',
+  usageDisplayHint: '自动：仅选中 DSH OpenCode Go 模型时显示输入栏额度；常驻：任意模型都显示；关闭：隐藏输入栏额度并停止其刷新。显示时每分钟刷新。侧边栏额度使用独立开关。',
   usageDisplay_auto: '自动（默认）',
   usageDisplay_always: '常驻',
   usageDisplay_off: '关闭',
@@ -487,6 +525,10 @@ export const zh: typeof en = {
   refreshMinutesHint: '模型目录的缓存时长；打开本页或点击刷新会立即重新核对。',
   streamIdleTimeoutMsLabel: '流空闲超时（毫秒）',
   streamIdleTimeoutMsHint: '流事件之间的最大静默间隔，超出则请求失败。',
+  requestPreparationTimeoutMsLabel: '请求准备超时（毫秒）',
+  requestPreparationTimeoutMsHint: '限制路由发现以及每次尝试在派发前的凭据与图片准备时间。',
+  requestTimeoutMsLabel: '请求总超时（毫秒）',
+  requestTimeoutMsHint: '整个派发期限，包括路由发现、图片准备与账号回退。',
   maxImagesLabel: '请求图片数量上限（maxImages）',
   maxImagesHint: '留空继承基础配置（基础未设上限时才不限制张数）；超限时最旧的图片会被替换为文字占位。',
   maxRequestImageBytesLabel: '请求图片载荷上限（字节）',
@@ -503,148 +545,182 @@ export const zh: typeof en = {
   saving: '保存中…',
   savedFailed: '上次保存未按草稿生效；请修正数值或放弃修改。',
   readOnly: '此部署中设置文档为只读。',
+  settingsLoading: '正在读取 OpenCode Go 设置…',
   unavailable: '此部署未提供 OpenCode Go 设置。',
 }
 
 /** Every copy key this page's dictionaries must supply. */
 export type OpencodeGoKey = keyof typeof en
 
-/** One palette's six theme colors plus the neutral surface steps. */
+/** All visual values shared by the settings, quota and history surfaces. */
 export interface GoThemeTokens {
   readonly bg: string
   readonly surface: string
   readonly surface2: string
   readonly border: string
+  /** Control boundary; a checked local value so WCAG 1.4.11 3:1 never depends on Host tokens. */
+  readonly borderStrong: string
   readonly text: string
   readonly muted: string
   readonly accent: string
+  /** Output-token chart series; a checked local value, not the Host status-dot color. */
   readonly accent2: string
+  readonly accentSoft: string
+  readonly onAccent: string
+  /** Cache-read chart series; a checked local value, not the Host status-dot color. */
+  readonly cacheRead: string
+  /** Cache-write chart series; a checked local value, not the Host status-dot color. */
+  readonly cacheWrite: string
+  /** A complete box-shadow declaration, not merely a shadow color. */
+  readonly shadow: string
   readonly success: string
   readonly warning: string
   readonly danger: string
+  readonly font: string
+  readonly displayFont: string
+  readonly numberFont: string
+  readonly radiusSmall: string
+  readonly radiusControl: string
+  readonly radiusPill: string
+  readonly radiusOption: string
+  readonly radiusCard: string
+  readonly radiusPopover: string
+  readonly radiusModal: string
+  readonly focusWidth: string
+  readonly displayWeight: string
+  readonly displayTracking: string
 }
 
-/** The four selectable styles. */
-export const GO_THEMES = ['silent-black', 'graphite', 'sea-salt', 'warm-sand'] as const
+/** Host color scheme followed by both visual themes. */
+export type GoThemeScheme = 'dark' | 'light'
 
-export type GoThemeId = typeof GO_THEMES[number]
+const CLASSIC_FONT = '"Anthropic Sans Web", "Anthropic Sans", "Styrene B", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
+const CLASSIC_DISPLAY_FONT = '"Anthropic Serif Web", "Anthropic Serif", "Tiempos Text", Charter, "Songti SC", "Noto Serif SC", SimSun, Georgia, serif'
+const CLASSIC_NUMBER_FONT = '"Anthropic Mono Web", "Anthropic Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace'
+const NATIVE_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
+const NATIVE_NUMBER_FONT = '"SFMono-Regular", Consolas, "Liberation Mono", monospace'
 
-/** Graphite is the default: it is the quietest match for the Host chrome. */
-export const DEFAULT_GO_THEME: GoThemeId = 'graphite'
+/**
+ * Opacity of an unselected chart bar. CSS paints the `--go-chart-*` series as
+ * a translucent layer over the page surface, so contrast checks must composite
+ * the rendered color with this value instead of measuring the raw token.
+ */
+export const CHART_BAR_OPACITY = 0.88
 
-/** Locale key carrying each theme's display name. */
-export const GO_THEME_LABELS: Record<GoThemeId, keyof typeof en> = {
-  'silent-black': 'themeSilentBlack',
-  graphite: 'themeGraphite',
-  'sea-salt': 'themeSeaSalt',
-  'warm-sand': 'themeWarmSand',
-}
+/**
+ * Share of the theme's text colour mixed into a quota bar's track. Native light
+ * can paint the layer a card sits on with the card's own colour, so a track
+ * made of that surface token disappears against it; mixing text into the
+ * backdrop keeps the bar legible on every Host surface the pale layer cannot
+ * guarantee (about 1.4:1 against light surfaces, 1.7:1 in dark). Exported so
+ * the contrast tests composite exactly the percentage the stylesheet paints.
+ */
+export const QUOTA_TRACK_PERCENT = 18
 
-/** Each style in both Host color schemes. */
-export const GO_THEME_TOKENS: Record<GoThemeId, { dark: GoThemeTokens; light: GoThemeTokens }> = {
-  'silent-black': {
-    dark: {
-      bg: '#101010', surface: '#181818', surface2: '#202020', border: '#2b2b2b',
-      text: '#e8e8e8', muted: '#8c8c8c', accent: '#4098f8', accent2: '#8b5cf6',
-      success: '#40b870', warning: '#f88830', danger: '#e5484d',
-    },
-    light: {
-      bg: '#f8f8f8', surface: '#ffffff', surface2: '#f0f0f0', border: '#e4e4e4',
-      text: '#1c1c1c', muted: '#757575', accent: '#0878f8', accent2: '#8250df',
-      success: '#188838', warning: '#e07800', danger: '#d9363e',
-    },
+/** Classic is deliberately independent from Host and third-party theme overrides. */
+export const GO_THEME_FALLBACKS: Record<GoThemeScheme, GoThemeTokens> = {
+  dark: {
+    bg: '#242422', surface: '#2d2c29', surface2: '#353430', border: '#49473f', borderStrong: '#8a877d',
+    text: '#eceae3', muted: '#b7b4a8', accent: '#e7a18a', accent2: '#b09a87',
+    accentSoft: '#49342b', onAccent: '#382017', cacheRead: '#8f8678', cacheWrite: '#a5aa8c',
+    shadow: '0 18px 48px #00000040', success: '#9bc6a7', warning: '#d6b274', danger: '#e6a09c',
+    font: CLASSIC_FONT, displayFont: CLASSIC_DISPLAY_FONT, numberFont: CLASSIC_NUMBER_FONT,
+    radiusSmall: '4px', radiusControl: '8px', radiusPill: '99px', radiusOption: '6px', radiusCard: '10px', radiusPopover: '12px', radiusModal: '14px',
+    focusWidth: '2px', displayWeight: '400', displayTracking: '-.025em',
   },
-  graphite: {
-    dark: {
-      bg: '#111214', surface: '#181a1e', surface2: '#202329', border: '#2a2e36',
-      text: '#edeff3', muted: '#9aa1ac', accent: '#6e8bff', accent2: '#a371f7',
-      success: '#3fb950', warning: '#d29922', danger: '#f85149',
-    },
-    light: {
-      bg: '#f6f7f9', surface: '#ffffff', surface2: '#f0f2f5', border: '#e3e6ea',
-      text: '#1f2328', muted: '#6e7781', accent: '#4f6bed', accent2: '#8250df',
-      success: '#1a7f37', warning: '#9a6700', danger: '#cf222e',
-    },
-  },
-  'sea-salt': {
-    dark: {
-      bg: '#0b1416', surface: '#111d20', surface2: '#182a2e', border: '#24383c',
-      text: '#e6f0f1', muted: '#8fa6ab', accent: '#2dd4bf', accent2: '#60a5fa',
-      success: '#34d399', warning: '#fbbf24', danger: '#fb7185',
-    },
-    light: {
-      bg: '#f3f8f8', surface: '#ffffff', surface2: '#eaf3f3', border: '#d8e6e6',
-      text: '#13262b', muted: '#5f7478', accent: '#0e8c8f', accent2: '#3b82f6',
-      success: '#2f9e6b', warning: '#c98a2b', danger: '#d9534f',
-    },
-  },
-  'warm-sand': {
-    dark: {
-      bg: '#14110e', surface: '#1d1915', surface2: '#27211a', border: '#352d24',
-      text: '#f4eee6', muted: '#a99c8d', accent: '#e08a62', accent2: '#7c9eff',
-      success: '#4ade80', warning: '#fbbf24', danger: '#fb7185',
-    },
-    light: {
-      bg: '#f7f3ec', surface: '#fffdf9', surface2: '#f1eae0', border: '#e6dccd',
-      text: '#241f1a', muted: '#7a6f63', accent: '#c96f4a', accent2: '#4f7cff',
-      success: '#3e8e63', warning: '#c98a2b', danger: '#c0504d',
-    },
+  light: {
+    bg: '#faf9f5', surface: '#fffefb', surface2: '#f0eee7', border: '#dedbd2', borderStrong: '#736f66',
+    text: '#30312e', muted: '#6b6a61', accent: '#a94e35', accent2: '#8a735f',
+    accentSoft: '#f5e7df', onAccent: '#ffffff', cacheRead: '#8a7766', cacheWrite: '#787c6b',
+    shadow: '0 18px 48px #28261b18', success: '#38654c', warning: '#8c6526', danger: '#a83e42',
+    font: CLASSIC_FONT, displayFont: CLASSIC_DISPLAY_FONT, numberFont: CLASSIC_NUMBER_FONT,
+    radiusSmall: '4px', radiusControl: '8px', radiusPill: '99px', radiusOption: '6px', radiusCard: '10px', radiusPopover: '12px', radiusModal: '14px',
+    focusWidth: '2px', displayWeight: '400', displayTracking: '-.025em',
   },
 }
 
-const STORAGE_KEY = 'dsh-opencode-go.theme'
-
-const listeners = new Set<() => void>()
-
-function isGoTheme(value: unknown): value is GoThemeId {
-  return typeof value === 'string' && (GO_THEMES as readonly string[]).includes(value)
+/**
+ * Neutral values used when Native cannot resolve a Host token, and the resolved
+ * value of every contrast-checked token: those must keep WCAG 1.4.11 3:1
+ * whatever palette Host or a third-party theme supplies.
+ */
+export const NATIVE_THEME_FALLBACKS: Record<GoThemeScheme, GoThemeTokens> = {
+  dark: {
+    bg: '#0f0f0f', surface: '#212123', surface2: '#292929', border: '#3c3c3d', borderStrong: '#a2a4a6',
+    text: '#f5f5f5', muted: '#a2a4a6', accent: '#7aaaff', accent2: '#4ed17e',
+    accentSoft: '#1c2b45', onAccent: '#0f0f0f', cacheRead: '#a2a4a6', cacheWrite: '#f7ad31',
+    shadow: '0 18px 48px #00000066', success: '#4ed17e', warning: '#f7ad31', danger: '#f87171',
+    font: NATIVE_FONT, displayFont: NATIVE_FONT, numberFont: NATIVE_NUMBER_FONT,
+    radiusSmall: '4px', radiusControl: '8px', radiusPill: '8px', radiusOption: '8px', radiusCard: '12px', radiusPopover: '12px', radiusModal: '16px',
+    focusWidth: '2px', displayWeight: '600', displayTracking: 'normal',
+  },
+  light: {
+    bg: '#fafafa', surface: '#ffffff', surface2: '#f5f5f5', border: '#e5e5e5', borderStrong: '#7f8287',
+    text: '#292929', muted: '#65676b', accent: '#4176e6', accent2: '#2f7d4f',
+    accentSoft: '#edf3fe', onAccent: '#ffffff', cacheRead: '#65676b', cacheWrite: '#9a5b07',
+    shadow: '0 18px 48px #00000026', success: '#2f7d4f', warning: '#9a5b07', danger: '#b4232d',
+    font: NATIVE_FONT, displayFont: NATIVE_FONT, numberFont: NATIVE_NUMBER_FONT,
+    radiusSmall: '4px', radiusControl: '8px', radiusPill: '8px', radiusOption: '8px', radiusCard: '12px', radiusPopover: '12px', radiusModal: '16px',
+    focusWidth: '2px', displayWeight: '600', displayTracking: 'normal',
+  },
 }
 
-function readStored(): GoThemeId {
-  try {
-    const value = globalThis.localStorage?.getItem(STORAGE_KEY)
-    return isGoTheme(value) ? value : DEFAULT_GO_THEME
-  } catch {
-    return DEFAULT_GO_THEME
+/**
+ * Native follows Host semantics for surfaces, text, accent and status colors.
+ * The contrast-checked control boundary and state chart series keep their
+ * local value; see the comment on the returned object.
+ */
+function nativeTheme(scheme: GoThemeScheme): GoThemeTokens {
+  const fallback = NATIVE_THEME_FALLBACKS[scheme]
+  return {
+    bg: `var(--dsw-alias-bg-base, ${fallback.bg})`,
+    surface: `var(--dsw-alias-bg-layer-1, ${fallback.surface})`,
+    surface2: `var(--dsw-alias-bg-layer-2, ${fallback.surface2})`,
+    border: `var(--dsw-alias-border-l1, ${fallback.border})`,
+    // Contrast-checked tokens stay Host-independent on purpose: Host's
+    // border-l2 is a hairline divider and its state-* colors are status dots,
+    // not data-viz series, so following them drops text inputs and chart bars
+    // below the WCAG 1.4.11 3:1 contract this file and docs/development.md
+    // promise. They are the only color tokens Native does not take from Host.
+    borderStrong: fallback.borderStrong,
+    text: `var(--dsw-alias-label-primary, ${fallback.text})`,
+    muted: `var(--dsw-alias-label-secondary, ${fallback.muted})`,
+    accent: `var(--dsw-alias-brand-primary, ${fallback.accent})`,
+    accent2: fallback.accent2,
+    accentSoft: `color-mix(in srgb, var(--dsw-alias-brand-primary, ${fallback.accent}) 16%, var(--dsw-alias-bg-base, ${fallback.bg}))`,
+    onAccent: `var(--dsw-alias-bg-base, ${fallback.onAccent})`,
+    cacheRead: fallback.cacheRead,
+    cacheWrite: fallback.cacheWrite,
+    shadow: `var(--dsw-elevation-prominent, ${fallback.shadow})`,
+    success: `var(--dsw-alias-state-success-primary, ${fallback.success})`,
+    warning: `var(--dsw-alias-state-warn-primary, ${fallback.warning})`,
+    danger: `var(--dsw-alias-state-error-primary, ${fallback.danger})`,
+    font: `var(--dsw-font-family, var(--dsh-font-family-text, ${fallback.font}))`,
+    displayFont: `var(--dsw-font-family, var(--dsh-font-family-text, ${fallback.displayFont}))`,
+    numberFont: `var(--ds-font-family-code, var(--dsh-font-family-code, ${fallback.numberFont}))`,
+    radiusSmall: `var(--dsw-radius-xs, ${fallback.radiusSmall})`,
+    radiusControl: `var(--dsw-radius-sm, ${fallback.radiusControl})`,
+    radiusPill: `var(--dsw-radius-sm, ${fallback.radiusPill})`,
+    radiusOption: `var(--dsw-radius-sm, ${fallback.radiusOption})`,
+    radiusCard: `var(--dsw-radius-md, ${fallback.radiusCard})`,
+    radiusPopover: `var(--dsw-radius-md, ${fallback.radiusPopover})`,
+    radiusModal: `var(--dsw-radius-lg, ${fallback.radiusModal})`,
+    focusWidth: `var(--dsw-focus-ring-width, ${fallback.focusWidth})`,
+    displayWeight: fallback.displayWeight,
+    displayTracking: fallback.displayTracking,
   }
 }
 
-let currentTheme: GoThemeId = readStored()
-
-/** The selected style, stable until the next write. */
-export function getGoTheme(): GoThemeId {
-  return currentTheme
+/** Theme first, color scheme second: Native follows the Host, Classic stays branded. */
+export const GO_THEME_TOKENS: Record<OpencodeGoTheme, Record<GoThemeScheme, GoThemeTokens>> = {
+  native: { dark: nativeTheme('dark'), light: nativeTheme('light') },
+  classic: { dark: GO_THEME_FALLBACKS.dark, light: GO_THEME_FALLBACKS.light },
 }
 
-/**
- * Select a style and persist it for this browser.
- * @param id - one of {@link GO_THEMES}; unknown ids are ignored.
- */
-export function setGoTheme(id: GoThemeId): void {
-  if (!isGoTheme(id) || id === currentTheme) return
-  currentTheme = id
-  try { globalThis.localStorage?.setItem(STORAGE_KEY, id) } catch { /* private mode */ }
-  for (const listener of listeners) listener()
-}
-
-/** Subscribe to style changes (for useSyncExternalStore). */
-export function subscribeGoTheme(listener: () => void): () => void {
-  listeners.add(listener)
-  return () => { listeners.delete(listener) }
-}
-
-/** Read the selected style in a component. */
-export function useGoTheme(): GoThemeId {
-  return useSyncExternalStore(subscribeGoTheme, getGoTheme, () => DEFAULT_GO_THEME)
-}
-
-/**
- * Follow the Host's light/dark scheme. The layout presenter marks a dark body
- * with `data-ds-dark-theme`; the attribute is observed so switching the Host
- * theme updates the surfaces without a reload.
- */
-export function useHostScheme(): 'dark' | 'light' {
-  const [scheme, setScheme] = useState<'dark' | 'light'>('dark')
+/** Follow the Host's body color-scheme marker without adding a Theme service dependency. */
+export function useHostScheme(): GoThemeScheme {
+  const [scheme, setScheme] = useState<GoThemeScheme>(() =>
+    typeof document === 'undefined' || document.body?.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light')
   useEffect(() => {
     if (typeof document === 'undefined') return
     const body = document.body
@@ -653,7 +729,6 @@ export function useHostScheme(): 'dark' | 'light' {
       setScheme(body.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light')
     }
     update()
-    // The SSR/client fixture ships a minimal DOM; observing is an enhancement.
     if (typeof MutationObserver === 'undefined') return
     const observer = new MutationObserver(update)
     observer.observe(body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
@@ -662,30 +737,75 @@ export function useHostScheme(): 'dark' | 'light' {
   return scheme
 }
 
-/** The active style's tokens for the Host's current scheme. */
-export function useGoThemeTokens(): GoThemeTokens {
-  const id = useGoTheme()
-  const scheme = useHostScheme()
-  return GO_THEME_TOKENS[id][scheme]
+/** Resolve one visual theme in the Host's current color scheme. */
+export function useGoThemeTokens(theme: OpencodeGoTheme = DEFAULT_OPENCODE_GO_THEME): GoThemeTokens {
+  return GO_THEME_TOKENS[theme][useHostScheme()]
 }
 
-/**
- * Inline custom properties consumed by the pill and dialog styles.
- * @param tokens - the active palette.
- * @returns a style object carrying every `--go-*` variable.
- */
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
+
+const DEFAULT_DATE_TIME_OPTIONS: Intl.DateTimeFormatOptions = {
+  year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: 'numeric', minute: 'numeric', second: 'numeric',
+}
+
+/** Format a date/time stamp using a module-level cached Intl.DateTimeFormat instance. */
+export function formatDateTime(
+  value: number | string | Date,
+  locale?: string,
+  options?: Intl.DateTimeFormatOptions,
+): string {
+  const date = value instanceof Date ? value : new Date(value)
+  const resolved = options ?? DEFAULT_DATE_TIME_OPTIONS
+  const key = `${locale ?? ''}:${options ? JSON.stringify(options) : 'default'}`
+  let fmt = dateTimeFormatters.get(key)
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(locale, resolved)
+    dateTimeFormatters.set(key, fmt)
+  }
+  return fmt.format(date)
+}
+
+const themeStyleCache = new WeakMap<GoThemeTokens, CSSProperties>()
+
+/** Internal derived custom properties; third-party themes customize the Host tokens instead. */
 export function themeStyle(tokens: GoThemeTokens): CSSProperties {
-  return {
+  let style = themeStyleCache.get(tokens)
+  if (style) return style
+  style = {
     '--go-bg': tokens.bg,
     '--go-surface': tokens.surface,
     '--go-surface-2': tokens.surface2,
     '--go-border': tokens.border,
+    '--go-border-strong': tokens.borderStrong,
     '--go-text': tokens.text,
     '--go-muted': tokens.muted,
     '--go-accent': tokens.accent,
     '--go-accent-2': tokens.accent2,
+    '--go-accent-soft': tokens.accentSoft,
+    '--go-on-accent': tokens.onAccent,
+    '--go-cache-read': tokens.cacheRead,
+    '--go-cache-write': tokens.cacheWrite,
+    '--go-shadow': tokens.shadow,
     '--go-success': tokens.success,
     '--go-warning': tokens.warning,
     '--go-danger': tokens.danger,
+    '--go-font': tokens.font,
+    '--go-display-font': tokens.displayFont,
+    '--go-number-font': tokens.numberFont,
+    '--go-radius-small': tokens.radiusSmall,
+    '--go-radius-control': tokens.radiusControl,
+    '--go-radius-pill': tokens.radiusPill,
+    '--go-radius-option': tokens.radiusOption,
+    '--go-radius-card': tokens.radiusCard,
+    '--go-radius-popover': tokens.radiusPopover,
+    '--go-radius-modal': tokens.radiusModal,
+    '--go-focus-width': tokens.focusWidth,
+    '--go-display-weight': tokens.displayWeight,
+    '--go-display-tracking': tokens.displayTracking,
+    '--go-track': `color-mix(in srgb, ${tokens.text} ${QUOTA_TRACK_PERCENT}%, transparent)`,
+    '--go-chart-bar-opacity': String(CHART_BAR_OPACITY),
   } as CSSProperties
+  themeStyleCache.set(tokens, style)
+  return style
 }

@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import {
   ReasoningEffortId,
+  BlockAssembler,
   createUserMessage,
   MessageId,
   userAgent,
@@ -17,7 +18,7 @@ import { closeMockGateways, listingBody, mockGateway, textEvents, fullLiveListin
 import { modelsDocument, modelEntry } from './support/data.ts'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { AttachmentId, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { AttachmentId, ImageVariantId, type ImageAttachmentRef, type ImageRequestTarget } from '@deepseek-ai/dsh-attachment'
 import { randomUUID } from 'node:crypto'
 
 describe("requests and deadlines", () => {
@@ -58,6 +59,18 @@ describe("requests and deadlines", () => {
     })
   }
 
+  function finishOf(chunks: readonly StreamChunk[]): Extract<StreamChunk, { type: 'finish' }> {
+    const finish = chunks.find((chunk): chunk is Extract<StreamChunk, { type: 'finish' }> => chunk.type === 'finish')
+    if (finish === undefined) throw new Error('missing finish chunk')
+    return finish
+  }
+
+  function errorFailure(chunks: readonly StreamChunk[]): { code: string; status?: number; providerRetryAfterMs?: number } {
+    const reason = finishOf(chunks).reason
+    if (reason.kind !== 'error') throw new Error(`expected an error finish, got ${reason.kind}`)
+    return reason.failure
+  }
+
   afterEach(async () => {
     vi.unstubAllEnvs()
     await closeMockGateways()
@@ -91,7 +104,7 @@ describe("requests and deadlines", () => {
       controller.abort()
       try {
         // Observe cancellation before releasing the unrelated shared network read.
-        const result = await Promise.race([outcome, new Promise<null>(resolve => setTimeout(() => resolve(null), 100))])
+        const result = await Promise.race([outcome, new Promise<null>(resolve => setTimeout(() => resolve(null), 2_000))])
         if (operation !== 'stream') expect(result).toMatchObject({ error: { code: 'ABORTED' } })
         else expect(result).toMatchObject({ value: [{ type: 'finish', reason: { kind: 'aborted' } }] })
         expect(metadataSignal?.aborted).toBe(false)
@@ -176,6 +189,101 @@ describe("requests and deadlines", () => {
       expect(chunks[0]).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: {
         code: 'INVALID_REQUEST', message: expect.stringContaining('Compact the context (/compact)'),
       } } })
+    })
+
+    it.each([200, 400])('clamps a Chinese conversation above 80 percent from replayed usage for HTTP %s', async status => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      const contextWindow = 131_072
+      gateway.pushCompletions({ events: [
+        textEvents[0]!, textEvents[1]!,
+        JSON.stringify({ choices: [{ delta: {}, index: 0, finish_reason: 'stop' }], usage: {
+          prompt_tokens: 110_000, completion_tokens: 1_024, prompt_tokens_details: { cached_tokens: 12_000 },
+        } }), '[DONE]',
+      ] })
+      gateway.pushCompletions(status === 400
+        ? { status, body: '{"model":"deepseek-v4.1-flash"}' }
+        : { events: textEvents })
+      const adapter = new OpencodeGoAdapter({
+        config: () => configOf(gateway.url, { modelLimits: { 'deepseek-v4.1-flash': { contextWindow } } }),
+        resolveApiKey: async () => 'test-key',
+      })
+      const first = requestOf({ messages: [createUserMessage({
+        content: [{ type: 'text', text: '中文'.repeat(30_000) }], source: { kind: 'plugin', plugin: 'test' },
+      })] })
+      const assembler = new BlockAssembler()
+      for (const chunk of await drain(adapter.stream(first))) assembler.push(chunk)
+      // Persist and restore exactly as a host session does between turns.
+      const previous = JSON.parse(JSON.stringify(assembler.message({
+        provider: PROVIDER_ID, model: first.model, replayState: assembler.replayState,
+      })))
+      expect(previous.source.replayState.response.usage).toEqual({
+        input: 98_000, output: 1_024, cacheRead: 12_000, cacheWrite: 0, totalTokens: 111_024,
+      })
+      const next = createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'plugin', plugin: 'test' } })
+      const chunks = await drain(adapter.stream(requestOf({ messages: [...first.messages, previous, next] })))
+      // Actual prior usage + one trailing token + the SDK's 4096-token reserve.
+      expect(gateway.bodies[0]).toMatchObject({ max_tokens: 65_536 })
+      expect(gateway.bodies[1]).toMatchObject({ max_tokens: contextWindow - 111_024 - 1 - 4_096 })
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: status === 400
+        ? { kind: 'error', failure: { code: 'CONTEXT_WINDOW_EXCEEDED' } }
+        : { kind: 'stop' } })
+    })
+
+    it.each(['compaction', 'pruning', 'system', 'tools', 'response', 'legacy'] as const)(
+      'discards stale context usage after %s instead of clamping a short request to one token', async change => {
+        const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+        gateway.pushCompletions({ events: [
+          textEvents[0]!, textEvents[1]!,
+          JSON.stringify({ choices: [{ delta: {}, index: 0, finish_reason: 'stop' }], usage: {
+            prompt_tokens: 124_000, completion_tokens: 3_072, total_tokens: 127_072,
+          } }), '[DONE]',
+        ] })
+        gateway.pushCompletions({ events: textEvents })
+        const adapter = new OpencodeGoAdapter({
+          config: () => configOf(gateway.url, { modelLimits: { 'deepseek-v4.1-flash': { contextWindow: 131_072 } } }),
+          resolveApiKey: async () => 'test-key',
+        })
+        const user = (text: string) => createUserMessage({
+          content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'test' },
+        })
+        const large = 'a'.repeat(420_000)
+        const first = requestOf({
+          system: change === 'system' ? large : 'System instructions',
+          messages: [...(change === 'compaction' || change === 'pruning' ? [user(large)] : []), user('Keep this recent turn.')],
+          tools: [{ name: 'lookup', description: change === 'tools' ? large : 'Look up a path', parameters: { type: 'object' } }],
+        })
+        try {
+          const assembler = new BlockAssembler()
+          for (const chunk of await drain(adapter.stream(first))) assembler.push(chunk)
+          const previous = JSON.parse(JSON.stringify(assembler.message({
+            provider: PROVIDER_ID, model: first.model, replayState: assembler.replayState,
+          })))
+          expect(previous.source.replayState.response.usage.totalTokens).toBe(127_072)
+          if (change === 'legacy') delete previous.source.replayState.response.usageContext
+          if (change === 'response') previous.content[0].text = 'Edited answer.'
+          const next = {
+            ...first,
+            system: change === 'system' ? 'Updated system instructions' : first.system,
+            tools: change === 'tools' ? [{ ...first.tools![0], description: 'Updated tool description' }] : first.tools,
+            messages: [
+              ...(change === 'compaction' ? [user('Compacted summary.'), first.messages.at(-1)!]
+                : change === 'pruning' ? [first.messages.at(-1)!] : first.messages),
+              previous, user('Continue.'),
+            ],
+          }
+          const chunks = await drain(adapter.stream(next))
+          expect(gateway.bodies[1]).toMatchObject({ max_tokens: 65_536 })
+          expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+        } finally { await adapter.dispose() }
+      },
+    )
+
+    it('keeps a model-only 400 as invalid request for a small context', async () => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      gateway.pushCompletions({ status: 400, body: '{"model":"deepseek-v4.1-flash"}' })
+      const adapter = await adapterFor(gateway.url)
+      const chunks = await drain(adapter.stream(requestOf()))
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_REQUEST' } } })
     })
 
     it('sends a fresh random session value per request when none arrived', async () => {
@@ -343,6 +451,44 @@ describe("requests and deadlines", () => {
       })
     })
 
+    it('reports the provider HTTP status and Retry-After wait on an error finish', async () => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      gateway.pushCompletions({
+        status: 429,
+        headers: { 'retry-after': '120' },
+        body: JSON.stringify({ error: { type: 'RateLimitError', message: 'slow down' } }),
+      })
+      const adapter = await adapterFor(gateway.url)
+
+      const failure = errorFailure(await drain(adapter.stream(requestOf())))
+
+      expect(failure).toMatchObject({ code: 'RATE_LIMIT', status: 429 })
+      expect(failure.providerRetryAfterMs).toBeGreaterThan(100_000)
+      expect(failure.providerRetryAfterMs).toBeLessThanOrEqual(120_000)
+    })
+
+    it('does not invent a Retry-After wait for a 429 without the header', async () => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      gateway.pushCompletions({ status: 429, body: JSON.stringify({ error: { type: 'RateLimitError', message: 'slow down' } }) })
+      const adapter = await adapterFor(gateway.url)
+
+      const failure = errorFailure(await drain(adapter.stream(requestOf())))
+
+      expect(failure).toMatchObject({ code: 'RATE_LIMIT', status: 429 })
+      expect(failure).not.toHaveProperty('providerRetryAfterMs')
+    })
+
+    it('omits Retry-After facts the failed response did not provide', async () => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      gateway.pushCompletions({ status: 503, body: JSON.stringify({ error: { message: 'unavailable' } }) })
+      const adapter = await adapterFor(gateway.url)
+
+      const failure = errorFailure(await drain(adapter.stream(requestOf())))
+
+      expect(failure).toMatchObject({ code: 'SERVER', status: 503 })
+      expect(failure).not.toHaveProperty('providerRetryAfterMs')
+    })
+
     it('degrades unusable replay state to provider-neutral history and reports it', async () => {
       const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
       gateway.pushCompletions({ events: textEvents })
@@ -378,6 +524,35 @@ describe("requests and deadlines", () => {
       const chunks = await drain(adapter.stream(history))
 
       expect(degraded).toHaveLength(1)
+      expect(chunks.find(chunk => chunk.type === 'finish')).toMatchObject({ reason: { kind: 'stop' } })
+    })
+
+    it('keeps a successful stream when diagnostics observers throw', async () => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      gateway.pushCompletions({ events: textEvents })
+      const thrower = (): never => { throw new Error('observer exploded') }
+      const adapter = new OpencodeGoAdapter({
+        config: () => configOf(gateway.url),
+        resolveApiKey: () => Promise.resolve('test-key'),
+        onAccountSettled: thrower,
+        onAccountSwitch: thrower,
+        onReplayDegrade: thrower,
+      })
+      // A foreign replay envelope normally reports a degradation; a throwing
+      // diagnostics observer must not turn conversion into a request failure.
+      const history = requestOf()
+      history.messages = [
+        createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'plugin', plugin: 'test' } }),
+        {
+          id: MessageId('m1'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'earlier answer' }],
+          source: { kind: 'model', provider: PROVIDER_ID, model: 'deepseek-v4.1-flash', replayState: { kind: 'foreign-adapter' } },
+        },
+      ]
+
+      const chunks = await drain(adapter.stream(history))
+
       expect(chunks.find(chunk => chunk.type === 'finish')).toMatchObject({ reason: { kind: 'stop' } })
     })
 
@@ -483,6 +658,65 @@ describe("requests and deadlines", () => {
       expect(adapter.providerInfo(PROVIDER_ID)).toEqual({ id: PROVIDER_ID, name: 'Default' })
     })
 
+    it('bounds rejection and credential-version bookkeeping without changing cooldowns', async () => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(['deepseek-v4.1-flash']) })
+      const adapter = await adapterFor(gateway.url)
+      const internals = adapter as unknown as {
+        rejectedKeys: Map<string, Map<string, number>>
+        credentialVersions: Map<string, number>
+        rememberRejectedKey(ref: string, gateway: string): void
+      }
+
+      // Expired rejections are pruned before a new rejection is remembered.
+      internals.rejectedKeys.set('EXPIRED', new Map([['https://gateway.invalid', Date.now() - 1]]))
+      internals.rememberRejectedKey('ACCOUNT_A', 'https://gateway.invalid')
+      expect(internals.rejectedKeys.has('EXPIRED')).toBe(false)
+      expect(internals.rejectedKeys.get('ACCOUNT_A')?.get('https://gateway.invalid')).toBeGreaterThan(Date.now())
+
+      // Credential events for references that are not accounts cannot grow the
+      // version map past its cap, and the current reference survives pressure.
+      for (let index = 0; index < 200; index += 1) adapter.forgetRejectedKey(`UNUSED_REF_${index}`)
+      expect(internals.credentialVersions.size).toBeLessThanOrEqual(64)
+      adapter.forgetRejectedKey('OPENCODE_API_KEY')
+      expect(internals.credentialVersions.has('OPENCODE_API_KEY')).toBe(true)
+      expect(internals.credentialVersions.size).toBeLessThanOrEqual(64)
+    })
+
+    it('reports configured thinking budgets it ignores without failing resolution', async () => {
+      const gateway = await mockGateway({ status: 200, body: modelsDocument({
+        budgeted: modelEntry({
+          api: { 'chat-completions': { base_url: 'https://opencode.ai/inference/go/openai/v1' } },
+          limit: { context: 10_000, output: 5_000 },
+          capabilities: { reasoning: { supported: true, toggle: true, budget: { min: 1024, max: 4096 } } },
+        }),
+      }) })
+      const warnings: { model: string; reason: string }[] = []
+      const adapter = new OpencodeGoAdapter({
+        config: () => configOf(gateway.url, { modelLimits: { budgeted: { thinkingBudgets: [60_000, 3000] } } }),
+        resolveApiKey: () => Promise.resolve('test-key'),
+        onModelWarning: detail => warnings.push(detail),
+      })
+
+      const resolved = await adapter.resolveModel(PROVIDER_ID, 'budgeted')
+
+      const ids = resolved.reasoning?.efforts.map(effort => String(effort.id)) ?? []
+      expect(ids).toContain('budget:3000')
+      expect(ids).not.toContain('budget:60000')
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toMatchObject({ model: 'budgeted' })
+      expect(warnings[0]!.reason).toContain('60000')
+      expect(warnings[0]!.reason).toContain('1024-3976')
+
+      // A usable configuration reports nothing.
+      const quiet = new OpencodeGoAdapter({
+        config: () => configOf(gateway.url, { modelLimits: { budgeted: { thinkingBudgets: [3000] } } }),
+        resolveApiKey: () => Promise.resolve('test-key'),
+        onModelWarning: detail => warnings.push(detail),
+      })
+      await quiet.resolveModel(PROVIDER_ID, 'budgeted')
+      expect(warnings).toHaveLength(1)
+    })
+
     it('applies and removes capacities immediately without dropping the catalog cache', async () => {
       const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
       let modelLimits: Record<string, { contextWindow?: number; maxTokens?: number }> = {}
@@ -520,7 +754,7 @@ describe("requests and deadlines", () => {
     await started.promise
     if (kind === 'caller') controller.abort()
     try {
-      const result = await Promise.race([outcome, new Promise(resolve => setTimeout(() => resolve('stalled'), 200))])
+      const result = await Promise.race([outcome, new Promise(resolve => setTimeout(() => resolve('stalled'), 2_000))])
       if (kind === 'caller') expect(result).toMatchObject({ value: [{ reason: { kind: 'aborted', failure: { code: 'ABORTED' } } }] })
       else expect(result).toMatchObject({ error: { code: 'TIMEOUT' } })
       expect(gateway.bodies).toHaveLength(0)
@@ -546,7 +780,7 @@ describe("requests and deadlines", () => {
     })] })))
     const outcome = pending.then(value => ({ value }), error => ({ error }))
     try {
-      expect(await Promise.race([outcome, new Promise(resolve => setTimeout(() => resolve('stalled'), 200))]))
+      expect(await Promise.race([outcome, new Promise(resolve => setTimeout(() => resolve('stalled'), 2_000))]))
         .toMatchObject({ error: { code: 'TIMEOUT' } })
       expect(read).toHaveBeenCalledTimes(1)
       expect(gateway.bodies).toHaveLength(0)
@@ -559,7 +793,7 @@ describe("requests and deadlines", () => {
     const release = Promise.withResolvers<string>()
     const accounts = [{ id: 'a', name: 'A', apiKeyEnv: 'ACCOUNT_A' }, { id: 'b', name: 'B', apiKeyEnv: 'ACCOUNT_B' }]
     const adapter = new OpencodeGoAdapter({ config: () => configOf(gateway.url, {
-      accounts, autoSwitch: true, apiKeyEnv: 'ACCOUNT_A', requestTimeoutMs: 80, requestPreparationTimeoutMs: 1000,
+      accounts, autoSwitch: true, apiKeyEnv: 'ACCOUNT_A', requestTimeoutMs: 250, requestPreparationTimeoutMs: 1000,
     }), resolveApiKey: async config => {
       if (config.apiKeyEnv === 'ACCOUNT_A') {
         await new Promise(resolve => setTimeout(resolve, 45))
@@ -573,10 +807,72 @@ describe("requests and deadlines", () => {
     const outcome = pending.then(value => ({ value }), error => ({ error }))
     await started.promise
     try {
-      expect(await Promise.race([outcome, new Promise(resolve => setTimeout(() => resolve('stalled'), 65))]))
+      expect(await Promise.race([outcome, new Promise(resolve => setTimeout(() => resolve('stalled'), 2_000))]))
         .toMatchObject({ error: { code: 'TIMEOUT' } })
     } finally { release.resolve('late-key'); await outcome }
     expect(gateway.bodies).toHaveLength(0)
+  })
+
+  describe('image request target', () => {
+    const image: ImageAttachmentRef = {
+      attachmentId: AttachmentId(`sha256:${'c'.repeat(64)}`),
+      mediaType: 'image/png',
+      bytes: 4_000_000,
+      width: 4096,
+      height: 4096,
+    }
+
+    function imageRequest(adapter: OpencodeGoAdapter): Promise<StreamChunk[]> {
+      return drain(adapter.stream(requestOf({ messages: [createUserMessage({
+        content: [{ type: 'image', attachment: image }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })] })))
+    }
+
+    it('reports the same resized target conversion serializes under live budgets', async () => {
+      const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
+      gateway.pushCompletions({ events: textEvents })
+      let requestImagePixelBudget = 2048 * 2048
+      let requestImageMaxBytes = 300_000
+      const targets: ImageRequestTarget[] = []
+      const store = {
+        readImageRequest: vi.fn(async (ref: ImageAttachmentRef, target: ImageRequestTarget) => {
+          targets.push(target)
+          return {
+            variantId: ImageVariantId(`sha256:${'d'.repeat(64)}`),
+            attachment: ref,
+            data: Uint8Array.of(1),
+            mediaType: ref.mediaType,
+            bytes: 1,
+            width: target.width,
+            height: target.height,
+            depth: 'uchar',
+            space: 'srgb',
+            hasAlpha: false,
+          }
+        }),
+      }
+      const adapter = new OpencodeGoAdapter({
+        config: () => configOf(gateway.url, { requestImagePixelBudget, requestImageMaxBytes }),
+        resolveApiKey: async () => 'test-key',
+        imageAccess: { resolveAttachments: () => store as never, resolveImageAccess: () => undefined },
+      })
+
+      await adapter.resolveModel(PROVIDER_ID, 'deepseek-v4.1-flash')
+      const reported = adapter.imageRequestTarget(PROVIDER_ID, 'deepseek-v4.1-flash', image)
+      expect(reported).toEqual({ width: 2048, height: 2048, maxBytes: requestImageMaxBytes })
+
+      expect(finishOf(await imageRequest(adapter)).reason).toMatchObject({ kind: 'stop' })
+      expect(targets).toHaveLength(1)
+      const serialized = targets[0]!
+      expect({ width: serialized.width, height: serialized.height, maxBytes: serialized.maxBytes }).toEqual(reported)
+
+      // A live settings edit moves the serialized target and the reported one together.
+      requestImagePixelBudget = 1024 * 1024
+      requestImageMaxBytes = 100_000
+      expect(adapter.imageRequestTarget(PROVIDER_ID, 'deepseek-v4.1-flash', image))
+        .toEqual({ width: 1024, height: 1024, maxBytes: 100_000 })
+    })
   })
 })
 

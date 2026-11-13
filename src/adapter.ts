@@ -11,6 +11,7 @@ import {
   modelSettingsKey,
 } from './contracts.ts'
 import { normalizeContext } from 'opencode-go-pi-ai'
+import { estimateContextTokens } from 'opencode-go-pi-ai/utils/estimate'
 import {
   LlmError,
   attributionHeaders,
@@ -23,7 +24,7 @@ import {
   type LlmModelInfo,
   type LlmResolvedModelInfo,
 } from '@deepseek-ai/dsh-llm'
-import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget } from '@deepseek-ai/dsh-attachment'
 import { deadline, idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { Api, Model, Provider } from './sdk-types.ts'
 import {
@@ -32,7 +33,7 @@ import {
   assertBaseURL,
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './config.ts'
-import { toPiContext, toStreamChunks, type PiImageRequestContext } from './conversion.ts'
+import { toPiContext, toStreamChunks, piContextUsageKey, requestImageTargetFor, type PiImageRequestContext } from './conversion.ts'
 import { createMaskState, restoreChunks, type PrivacyMaskClient } from './privacy.ts'
 import { GatewayDiagnostics, waitWithSignal, ProxyTransport } from './transport.ts'
 import {
@@ -47,8 +48,58 @@ import {
 } from './catalog.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { accountFallback, isGatewayKeyRejection } from './accounts.ts'
+import { FreeBunTransport, OPENCODE_FREE_USER_AGENT } from './free-transport.ts'
+import { FreeChannelState } from './free-channel.ts'
 
 const DEFAULT_MAX_TOKENS = 65_536
+
+/**
+ * Bound for the per-reference rejection map. Only account references are ever
+ * attempted (the roster is capped at MAX_ACCOUNTS), so this cap is defensive:
+ * expired entries are pruned first, and the cap only evicts under artificial
+ * reference churn.
+ */
+const MAX_REJECTED_KEY_REFS = 64
+
+/**
+ * Bound for {@link OpencodeGoAdapter.credentialVersions}. Account rosters are
+ * capped at MAX_ACCOUNTS, so the map only exceeds this under credential events
+ * for references that are not current accounts.
+ */
+const MAX_CREDENTIAL_VERSIONS = 64
+
+/** Diagnostics observers must never turn a working request into a failure. */
+function observe(observer: (() => void) | undefined): void {
+  if (observer === undefined) return
+  try { observer() } catch { /* Diagnostics cannot fail a request. */ }
+}
+
+/** Origin of a configured endpoint for diagnostics; never includes credentials. */
+function endpointOrigin(raw: string): string {
+  try { return new URL(raw).origin } catch { return '[invalid URL]' }
+}
+
+/**
+ * Whether the Free route may reuse saved Go credentials. A saved key is bound
+ * to the endpoint it was configured for: the official platform gateway over
+ * HTTPS on its default port, or a free base sharing the Go gateway's origin
+ * (one self-hosted or reverse-proxy deployment serving both routes). Any other
+ * `freeBaseURL` gets public access only, so pointing it at a third party cannot
+ * forward a stored paid key. The official hostname alone is not enough: a
+ * plain-text or re-ported `opencode.ai` URL could be intercepted or served by
+ * an unknown listener, so it must not receive saved credentials either.
+ * This is a local decision: no network probe is made and no credential is read.
+ * @param config - the mount configuration captured for this request.
+ * @returns true when Free may send saved account credentials.
+ */
+export function freeReusesSavedKeys(config: Pick<OpencodeGoConfig, 'baseURL' | 'freeBaseURL'>): boolean {
+  let free: URL
+  try { free = new URL(config.freeBaseURL) } catch { return false }
+  // WHATWG URL removes the default port, so an empty `port` is the only
+  // spelling of the official HTTPS endpoint.
+  if (free.hostname.toLowerCase() === 'opencode.ai') return free.protocol === 'https:' && free.port === ''
+  try { return free.origin === new URL(config.baseURL).origin } catch { return false }
+}
 
 /**
  * Cap large models at 64k unless the caller or settings specify an allowance.
@@ -78,6 +129,8 @@ export interface OpencodeGoImageAccess {
 
 /** Host dependencies used by a single attempt, independent of account selection. */
 export interface OpencodeGoRequestExecutorOptions {
+  /** Free-only passive backoff; never consulted by the Go executor. */
+  freeChannel?: FreeChannelState
   /** Resolve the credential reference captured with this call's endpoint; missing must fail loud. */
   resolveApiKey: (config: OpencodeGoConfig, signal?: AbortSignal) => Promise<string | undefined>
   /**
@@ -94,6 +147,12 @@ export interface OpencodeGoRequestExecutorOptions {
   privacy?: PrivacyMaskClient
   /** Observe advisory privacy facts such as uninspected media; never blocks. */
   onPrivacyWarning?: (reason: string) => void
+  /**
+   * Observe a configured thinking budget that was ignored or clamped for one
+   * model. Configured budgets never fail resolution; this is the only visible
+   * signal that a stale setting was dropped.
+   */
+  onModelWarning?: (detail: { model: string; reason: string }) => void
 }
 
 /** Inputs already resolved by the adapter, including one account and the wire session ID. */
@@ -109,9 +168,10 @@ export interface OpencodeGoRequestSnapshot {
 function resolveReasoningLevel(
   model: Model<Api>,
   effort: GenerateOptions['reasoningEffort'],
+  onWarning?: (reason: string) => void,
 ): string | undefined {
   if (effort === undefined) return undefined
-  const supported = reasoningChoices(model).map(choice => choice.id)
+  const supported = reasoningChoices(model, onWarning).map(choice => choice.id)
   if (supported.some(level => level === effort)) return effort
   throw new LlmError(
     `opencode-go model "${model.id}" does not support reasoning effort "${effort}"`,
@@ -121,19 +181,73 @@ function resolveReasoningLevel(
 
 /** Shares the adapter's transport without owning its lifetime or retrying accounts. */
 export class OpencodeGoRequestExecutor {
+  private readonly freeTransport: FreeBunTransport
+  private readonly ownsFreeTransport: boolean
+
   constructor(
     private readonly options: OpencodeGoRequestExecutorOptions,
     private readonly transport: ProxyTransport,
-  ) {}
+    freeTransport?: FreeBunTransport,
+  ) {
+    // An injected transport belongs to its caller (the adapter or the Host);
+    // only the executor's own default has no other owner to release it.
+    this.ownsFreeTransport = freeTransport === undefined
+    this.freeTransport = freeTransport ?? new FreeBunTransport()
+  }
+
+  /**
+   * Release a Free transport this executor created itself. An injected
+   * transport is released by its owner, so a direct construction is the only
+   * caller for which this performs work.
+   */
+  async dispose(): Promise<void> {
+    if (this.ownsFreeTransport) await this.freeTransport.dispose()
+  }
 
   /** One account, one SDK attempt; host recovery still owns failures after output. */
   async *stream(options: GenerateOptions, snapshot: OpencodeGoRequestSnapshot): AsyncIterable<StreamChunk> {
+    const state = snapshot.model.source === 'free' ? this.options.freeChannel : undefined
+    if (!state) { yield* this.attempt(options, snapshot); return }
+    options.signal?.throwIfAborted()
+    state.assertReady(snapshot.config)
+    const ticket = state.begin(snapshot.config)
+    let diagnostics: GatewayDiagnostics | undefined
+    let finished = false
+    const record = async (outcome: 'success' | 'error' | 'aborted', code?: string): Promise<void> => {
+      if (finished) return
+      finished = true
+      const failureCode = code === 'TIMEOUT' ? code
+        : diagnostics ? await diagnostics.failureCode(code ?? 'PI_AI_ERROR') : code ?? 'UNKNOWN'
+      state.finish(ticket, { outcome,
+        code: outcome === 'error' ? failureCode : undefined, retryAt: diagnostics?.retryDeadline() })
+    }
+    try {
+      for await (const chunk of this.attempt(options, snapshot, value => { diagnostics = value })) {
+        if (chunk.type === 'finish') {
+          await record(chunk.reason.kind === 'error' ? 'error' : chunk.reason.kind === 'aborted' ? 'aborted' : 'success',
+            chunk.reason.kind === 'error' ? chunk.reason.failure.code : undefined)
+        }
+        yield chunk
+      }
+      if (!finished) await record('error', 'PI_AI_ERROR')
+    } catch (error) {
+      await record(options.signal?.aborted && !(error instanceof LlmError && error.code === 'TIMEOUT') ? 'aborted' : 'error',
+        error instanceof LlmError ? error.code : 'UNKNOWN')
+      throw error
+    } finally {
+      if (!finished) await record('aborted')
+    }
+  }
+
+  private async *attempt(options: GenerateOptions, snapshot: OpencodeGoRequestSnapshot,
+    onDiagnostics?: (diagnostics: GatewayDiagnostics) => void,
+  ): AsyncIterable<StreamChunk> {
     if (options.stop !== undefined) {
       throw new LlmError('llm-opencode-go does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION')
     }
     const { config, provider, model, sessionId } = snapshot
     const maxTokens = requestMaxTokens(model, config.modelLimits, options.maxTokens)
-    const reasoning = resolveReasoningLevel(model, options.reasoningEffort)
+    const reasoning = resolveReasoningLevel(model, options.reasoningEffort, reason => observe(() => this.options.onModelWarning?.({ model: model.id, reason })))
 
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -214,33 +328,66 @@ export class OpencodeGoRequestExecutor {
       }
       // The sync overload converts every message from the session log; the
       // images overload additionally converts attachment references through
-      // the mounted attachment service.
+      // the mounted attachment service. The degrade observer is isolated: a
+      // throwing diagnostic callback must not fail the conversion.
+      const onReplayDegrade = this.options.onReplayDegrade === undefined ? undefined
+        : (reason: string): void => { observe(() => this.options.onReplayDegrade?.(reason)) }
       const context = await waitWithSignal(() => imageRequest === undefined
-        ? Promise.resolve(toPiContext(options, undefined, this.options.onReplayDegrade))
-        : toPiContext({ ...options, signal: preparation.signal }, imageRequest, this.options.onReplayDegrade), preparation.signal)
+        ? Promise.resolve(toPiContext(options, undefined, onReplayDegrade))
+        : toPiContext({ ...options, signal: preparation.signal }, imageRequest, onReplayDegrade), preparation.signal)
       preparation[Symbol.dispose]()
       watchdog.signal.throwIfAborted()
       // Direct providers accept a transcript, unlike Models which normalizes
       // Context itself. Preserve prompts and tool declarations on every host.
+      const transcript = normalizeContext(context)
+      const usageContext = piContextUsageKey(context, options.provider, model.id)
       const diagnostics = new GatewayDiagnostics({
         provider: String(options.provider), model: model.id, apiKey, proxyURL: config.proxyURL,
-        fetch: this.transport.forProxy(config.proxyURL), contextWindow: model.contextWindow, maxTokens,
+        free: model.source === 'free',
+        // Free's SOCKS relay must outlive this request's own stream idle budget:
+        // the budget is user-configurable and the relay must not classify the
+        // stall as a network error before the stream watchdog fires.
+        fetch: model.source === 'free'
+          ? this.freeTransport.forProxy(config.proxyURL, config.streamIdleTimeoutMs)
+          : this.transport.forProxy(config.proxyURL),
+        contextWindow: model.contextWindow, maxTokens: maxTokens ?? model.maxTokens,
+        get estimatedContextTokens(): number { return estimateContextTokens(transcript).tokens },
       })
-      const reasoningOptions = reasoningRequest(reasoningIntent(model, reasoning))
-      const events = provider.streamSimple(model, normalizeContext(context), {
+      onDiagnostics?.(diagnostics)
+      // GatewayDiagnostics classifies the HTTP response, but the finish failure
+      // contract also carries the provider status and Retry-After. Observe the
+      // non-ok status here; retryDeadline() already carries the parsed delay.
+      const diagnosticsFetch = diagnostics.fetch
+      let httpStatus: number | undefined
+      const observedFetch: typeof globalThis.fetch = async (input, init) => {
+        const response = await diagnosticsFetch(input, init)
+        if (!response.ok) httpStatus = response.status
+        return response
+      }
+      const failureFacts = (): { status?: number; providerRetryAfterMs?: number } => {
+        const retryAt = diagnostics.retryDeadline()
+        const retryAfterMs = retryAt === undefined ? undefined : retryAt - Date.now()
+        return {
+          ...httpStatus === undefined ? {} : { status: httpStatus },
+          ...retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0
+            ? {} : { providerRetryAfterMs: retryAfterMs },
+        }
+      }
+      const reasoningOptions = reasoningRequest(reasoningIntent(model, reasoning, reason => observe(() => this.options.onModelWarning?.({ model: model.id, reason }))))
+      const events = provider.streamSimple(model, transcript, {
         apiKey,
-        fetch: diagnostics.fetch,
+        fetch: observedFetch,
         ...reasoningOptions,
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...maxTokens === undefined ? {} : { maxTokens },
         sessionId,
         signal: watchdog.signal,
-        // Harness-owned request identity: the gateway refuses requests without
-        // `x-opencode-session` and profiles clients by User-Agent, and
-        // attribution merges last in pi-ai's client.
-        headers: {
+        headers: model.source === 'free' ? {
           'x-opencode-session': sessionId,
-          ...model.source === 'free' ? { authorization: `Bearer ${apiKey}` } : {},
+          'user-agent': OPENCODE_FREE_USER_AGENT,
+          authorization: `Bearer ${apiKey}`,
+        } : {
+          'x-opencode-session': sessionId,
           ...attributionHeaders(),
         },
         // The agent recovery layer owns visible attempts; one adapter call is
@@ -248,7 +395,7 @@ export class OpencodeGoRequestExecutor {
         maxRetries: 0,
         ...(onPayload === undefined ? {} : { onPayload }),
       })
-      const converted = toStreamChunks(events, model.contextWindow, options.signal, model.id, options.provider, maxTokens)
+      const converted = toStreamChunks(events, model.contextWindow, options.signal, model.id, options.provider, maxTokens, usageContext)
       const iterator = (maskState === undefined ? converted : restoreChunks(converted, maskState, () => maskFailure))[Symbol.asyncIterator]()
       let exhausted = false
       try {
@@ -269,7 +416,7 @@ export class OpencodeGoRequestExecutor {
             const code = await waitWithSignal(() => diagnostics.failureCode(failure.code), watchdog.signal)
             const finished: StreamChunk = { ...chunk, reason: options.signal?.aborted
               ? { kind: 'aborted', failure: { code: 'ABORTED', message: 'opencode-go request aborted by caller' } }
-              : { ...chunk.reason, failure: { ...chunk.reason.failure, message, code } } }
+              : { ...chunk.reason, failure: { ...chunk.reason.failure, message, code, ...failureFacts() } } }
             yield finished
           } else {
             yield chunk
@@ -330,7 +477,11 @@ export interface GoAccountSettlement {
 /** Constructor inputs for {@link OpencodeGoAdapter}. */
 export interface OpencodeGoAdapterOptions extends OpencodeGoRequestExecutorOptions {
   source?: ModelSource
-  /** Shared with Host usage reads for this plugin mount. */
+  /**
+   * Transport shared with the Host composition (usage reads, analytics and the
+   * other route). Injected ownership stays with the caller: {@link OpencodeGoAdapter.dispose}
+   * releases only this adapter's Free transport in that case.
+   */
   transport?: ProxyTransport
   /** Mount-owned discovery; direct construction supplies its own manager. */
   catalog?: (config: OpencodeGoConfig) => OpencodeGoCatalog
@@ -355,6 +506,12 @@ export interface OpencodeGoAdapterOptions extends OpencodeGoRequestExecutorOptio
   onAccountSettled?: (event: GoAccountSettlement) => void
   /** Legacy notice observer. Hosts that persist selection should use onAccountSettled. */
   onAccountSwitch?: (notice: GoAccountSwitch | undefined, config: OpencodeGoConfig, seq: number) => void
+  /**
+   * Observe one Free request refusing to reuse saved credentials because its
+   * `freeBaseURL` is not bound to them. The detail carries origins only, never a
+   * credential; the Host may log it at info/debug level.
+   */
+  onFreeCredentialWithheld?: (detail: { reason: 'unbound-free-endpoint'; freeBaseURL: string }) => void
 }
 
 /** Configuration, model and provider captured together before discovery yields. */
@@ -406,12 +563,20 @@ export class OpencodeGoAdapter extends LlmAdapter {
   private readonly source: ModelSource
   private readonly resolveCatalog: (config: OpencodeGoConfig) => OpencodeGoCatalog
   private readonly transport: ProxyTransport
+  /** An injected transport is shared with the Host and must not be disposed here. */
+  private readonly ownsTransport: boolean
   private readonly requestExecutor: OpencodeGoRequestExecutor
+  private readonly freeTransport = new FreeBunTransport()
+  private readonly freeChannel: FreeChannelState
 
   /** Per-reference rejection deadlines, isolated by the gateway that rejected it. */
   private readonly rejectedKeys = new Map<string, Map<string, number>>()
-  /** Reference updates invalidate rejections from attempts using an older key. */
+  /**
+   * Reference updates invalidate rejections from attempts using an older key.
+   * Values are globally monotonic epochs, so pruning never reuses a version.
+   */
   private readonly credentialVersions = new Map<string, number>()
+  private credentialEpoch = 0
 
   /** Monotonic sequence of the latest request this adapter started. */
   private callSeq = 0
@@ -421,8 +586,10 @@ export class OpencodeGoAdapter extends LlmAdapter {
   constructor(private readonly options: OpencodeGoAdapterOptions) {
     super()
     this.source = options.source ?? 'go'
+    this.freeChannel = options.freeChannel ?? new FreeChannelState()
+    this.ownsTransport = options.transport === undefined
     this.transport = options.transport ?? new ProxyTransport()
-    this.requestExecutor = new OpencodeGoRequestExecutor(options, this.transport)
+    this.requestExecutor = new OpencodeGoRequestExecutor({ ...options, freeChannel: this.freeChannel }, this.transport, this.freeTransport)
     const catalogs = options.catalog ? undefined : new GoCatalogManager({
       transport: this.transport, onFallback: options.onFallback, onOmitted: options.onOmitted,
       onRefresh: options.onCatalogRefresh, onWarning: options.onCatalogWarning,
@@ -430,7 +597,18 @@ export class OpencodeGoAdapter extends LlmAdapter {
     this.resolveCatalog = options.catalog ?? (config => catalogs!.forConfig(config, this.source))
   }
 
-  dispose(): Promise<void> { return this.transport.dispose() }
+  /**
+   * Release this adapter's own resources. The Host composition shares one
+   * ProxyTransport across both adapters and its services, so only an
+   * adapter-created transport is disposed here; the per-adapter Free transport
+   * (Bun workers and SOCKS tunnels) always is.
+   */
+  async dispose(): Promise<void> {
+    await Promise.all([
+      this.ownsTransport ? this.transport.dispose() : Promise.resolve(),
+      this.freeTransport.dispose(),
+    ])
+  }
 
   /**
    * The catalog resolver for one configuration, rebuilding on the facts it
@@ -445,6 +623,22 @@ export class OpencodeGoAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): { id: string; name: string } {
     return { id: provider, name: this.source === 'go' ? DISPLAY_NAME : FREE_DISPLAY_NAME }
+  }
+
+  /**
+   * Report the exact request-image projection this route serializes: the
+   * configured pixel budget decides the dimensions and the configured
+   * encoded-byte target caps the bytes, matching conversion.ts's per-request
+   * target. The token meter must price what is sent, not the normalized source.
+   * Synchronous by contract; the live configuration is readable without I/O.
+   */
+  override imageRequestTarget(_provider: string, _model: string, image: ImageAttachmentRef): ImageRequestTarget {
+    const config = this.options.config()
+    const target = requestImageTargetFor(image, {
+      maxPixels: config.requestImagePixelBudget,
+      maxBytes: config.requestImageMaxBytes,
+    })
+    return { width: target.width, height: target.height, maxBytes: target.maxBytes }
   }
 
   override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
@@ -509,7 +703,7 @@ export class OpencodeGoAdapter extends LlmAdapter {
   private modelInfo(model: Model<Api>, limits: OpencodeGoModelLimits): LlmResolvedModelInfo {
     const defaultMaxTokens = requestMaxTokens(model, limits)
     const reasoning: Pick<LlmResolvedModelInfo, 'reasoning'> = {}
-    const choices = reasoningChoices(model)
+    const choices = reasoningChoices(model, reason => observe(() => this.options.onModelWarning?.({ model: model.id, reason })))
     if (choices.length > 0) {
       reasoning.reasoning = {
         efforts: choices.map(choice => ({ ...choice, id: ReasoningEffortId(choice.id) })),
@@ -542,6 +736,10 @@ export class OpencodeGoAdapter extends LlmAdapter {
     const sessionId = opencodeSessionValue(options.sessionId === undefined ? undefined : String(options.sessionId))
     using whole = deadline(options.signal, captured.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, 'LLM_REQUEST_TIMEOUT')
     try {
+      if (this.source === 'free') {
+        whole.signal.throwIfAborted()
+        this.freeChannel.assertReady(captured.config)
+      }
       const snapshot = prepared ?? {
         generation: captured.generation,
         ...await this.modelSnapshot(options.model, whole.signal, captured.config),
@@ -562,6 +760,19 @@ export class OpencodeGoAdapter extends LlmAdapter {
   }
 
   private async *streamAccounts(options: GenerateOptions, snapshot: OpencodeGoDispatchSnapshot, seq: number): AsyncIterable<StreamChunk> {
+    const streamPublic = () => this.requestExecutor.stream(options, { config: snapshot.config, model: snapshot.model,
+      provider: snapshot.catalog.provider, sessionId: snapshot.sessionId, apiKey: 'public' })
+    if (this.source === 'free' && !freeReusesSavedKeys(snapshot.config)) {
+      // A Free endpoint that is neither official nor the Go gateway's own origin
+      // must never receive saved account credentials: send public access only,
+      // and report why without reading or echoing any key.
+      observe(() => this.options.onFreeCredentialWithheld?.({
+        reason: 'unbound-free-endpoint',
+        freeBaseURL: endpointOrigin(snapshot.config.freeBaseURL),
+      }))
+      yield* streamPublic()
+      return
+    }
     const accounts = accountsOf(snapshot.config)
     if (this.source === 'go' && accounts.length === 0) throw new LlmError('OpenCode Go has no accounts', 'MISSING_CREDENTIAL')
     // The preferred reference resolves through accountRefOf: an empty string
@@ -576,43 +787,46 @@ export class OpencodeGoAdapter extends LlmAdapter {
     const now = Date.now()
     const gateway = assertBaseURL(this.source === 'go' ? snapshot.config.baseURL : snapshot.config.freeBaseURL,
       this.source === 'go' ? 'baseURL' : 'freeBaseURL')
+    // Expired rejections are pruned before every attempt, so the map stays
+    // bounded by recently rejected references instead of growing with history.
+    this.pruneRejectedKeys(now)
     const usable = ordered.filter(ref => {
-      const rejected = this.rejectedKeys.get(ref)
-      const until = rejected?.get(gateway)
-      if (until === undefined) return true
-      if (now >= until) {
-        rejected!.delete(gateway)
-        if (rejected!.size === 0) this.rejectedKeys.delete(ref)
-        return true
-      }
-      return false
+      const until = this.rejectedKeys.get(ref)?.get(gateway)
+      return until === undefined || now >= until
     })
     const candidates = this.accountCandidates(snapshot.config, ordered, usable, options.signal)
     let candidate = await candidates.next()
     if (candidate.done) {
-      if (this.source === 'free') yield* this.requestExecutor.stream(options, { config: snapshot.config, model: snapshot.model,
-        provider: snapshot.catalog.provider, sessionId: snapshot.sessionId, apiKey: 'public' })
+      if (this.source === 'free') yield* streamPublic()
       return
     }
     let switchReason: GoAccountSwitch['reason'] | undefined
     let failedRef: string | undefined
-    while (!candidate.done) {
+    let publicFallback = false
+    while (!candidate.done && !publicFallback) {
       const { ref, apiKey, credentialVersion, skippedRef } = candidate.value
       let emitted = false
       let usage: Extract<StreamChunk, { type: 'usage' }> | undefined
       let retry = false
       const retryFailure = async (failure: { code: string } | undefined): Promise<boolean> => {
         const reason = accountFallback({ failure, emitted, totalTokens: usage?.usage.totalTokens ?? 0,
-          aborted: options.signal?.aborted === true, hasNext: snapshot.config.autoSwitch === true })
+          aborted: options.signal?.aborted === true, hasNext: snapshot.config.autoSwitch === true || this.source === 'free' })
         if (!emitted && !options.signal?.aborted && !usage?.usage.totalTokens && failure && isGatewayKeyRejection(failure)
           && credentialVersion === (this.credentialVersions.get(ref) ?? 0)) this.rememberRejectedKey(ref, gateway)
         if (!reason || !failure) return false
-        const next = await candidates.next()
-        if (next.done) return false
-        switchReason ??= reason
-        failedRef ??= ref
-        candidate = next
-        return true
+        if (snapshot.config.autoSwitch) {
+          const next = await candidates.next()
+          if (!next.done) {
+            switchReason ??= reason
+            failedRef ??= ref
+            candidate = next
+            return true
+          }
+        }
+        // Public Free access remains available when saved credentials are
+        // rejected, including when switching between saved accounts is off.
+        publicFallback = this.source === 'free' && ['INVALID_CREDENTIAL', 'AUTH'].includes(failure.code)
+        return publicFallback
       }
       const announce = (): void => {
         if (emitted) return
@@ -627,8 +841,10 @@ export class OpencodeGoAdapter extends LlmAdapter {
           reason: switchReason ?? 'credential',
           at: Date.now(),
         }
-        this.options.onAccountSettled?.({ seq, generation: snapshot.generation, config: snapshot.config, ref: serving, notice })
-        this.options.onAccountSwitch?.(notice, snapshot.config, seq)
+        // Account observers persist selection and drive UI notices; a throwing
+        // observer must not turn an already-successful stream into a failure.
+        observe(() => this.options.onAccountSettled?.({ seq, generation: snapshot.generation, config: snapshot.config, ref: serving, notice }))
+        observe(() => this.options.onAccountSwitch?.(notice, snapshot.config, seq))
       }
       try {
         for await (const chunk of this.requestExecutor.stream(options, {
@@ -654,6 +870,7 @@ export class OpencodeGoAdapter extends LlmAdapter {
         if (!await retryFailure(error instanceof LlmError ? error : undefined)) throw error
       }
     }
+    if (publicFallback) yield* streamPublic()
   }
 
   /** Resolve Free keys only when selecting an account or retrying a failed attempt. */
@@ -691,15 +908,59 @@ export class OpencodeGoAdapter extends LlmAdapter {
     }
   }
 
+  /** Drop expired rejections so the maps stay bounded by the recent window. */
+  private pruneRejectedKeys(now: number): void {
+    for (const [ref, gateways] of this.rejectedKeys) {
+      for (const [gateway, until] of gateways) if (now >= until) gateways.delete(gateway)
+      if (gateways.size === 0) this.rejectedKeys.delete(ref)
+    }
+  }
+
   private rememberRejectedKey(ref: string, gateway: string): void {
+    const now = Date.now()
+    this.pruneRejectedKeys(now)
     const rejected = this.rejectedKeys.get(ref) ?? new Map<string, number>()
-    rejected.set(gateway, Date.now() + REJECTED_KEY_TTL_MS)
+    rejected.set(gateway, now + REJECTED_KEY_TTL_MS)
     this.rejectedKeys.set(ref, rejected)
+    // Defensive cap: only account references are attempted, so this can only
+    // evict under artificial reference churn. Expired entries were pruned first,
+    // which keeps the normal working set at the live roster size.
+    while (this.rejectedKeys.size > MAX_REJECTED_KEY_REFS) {
+      const oldest = this.rejectedKeys.keys().next().value
+      if (oldest === undefined || oldest === ref) break
+      this.rejectedKeys.delete(oldest)
+    }
   }
 
   /** A stored change to a reference outranks the gateway's last rejection of it. */
   forgetRejectedKey(ref: string): void {
-    this.credentialVersions.set(ref, (this.credentialVersions.get(ref) ?? 0) + 1)
+    // Globally monotonic epochs: pruning the map can never reuse a version, so
+    // a request that captured a stale version still fails the guard.
+    this.credentialEpoch += 1
+    this.credentialVersions.set(ref, this.credentialEpoch)
     this.rejectedKeys.delete(ref)
+    this.pruneCredentialVersions()
+  }
+
+  /**
+   * Keep the version map bounded: account rosters are at most MAX_ACCOUNTS, so
+   * only references that are not current accounts can push it over the cap.
+   * Those are evicted first; the roster entries are kept. A pruned entry reads
+   * as version 0 (unchanged), which cannot falsely match an attempt that saw a
+   * real epoch (>= 1); requests started before a reference's first change keep
+   * their 0 and are only reachable in the artificial overflow/rename window.
+   */
+  private pruneCredentialVersions(): void {
+    if (this.credentialVersions.size <= MAX_CREDENTIAL_VERSIONS) return
+    const roster = new Set(accountsOf(this.options.config()).map(account => account.apiKeyEnv))
+    for (const ref of this.credentialVersions.keys()) {
+      if (this.credentialVersions.size <= MAX_CREDENTIAL_VERSIONS) return
+      if (!roster.has(ref)) this.credentialVersions.delete(ref)
+    }
+    while (this.credentialVersions.size > MAX_CREDENTIAL_VERSIONS) {
+      const oldest = this.credentialVersions.keys().next().value
+      if (oldest === undefined) return
+      this.credentialVersions.delete(oldest)
+    }
   }
 }

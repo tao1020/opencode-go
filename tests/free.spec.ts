@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import LlmRuntime, { LlmError } from '@deepseek-ai/dsh-llm'
-import { OpencodeGoAdapter } from '../src/adapter.ts'
+import LlmRuntime, { LlmError, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { OpencodeGoAdapter, OpencodeGoRequestExecutor, freeReusesSavedKeys } from '../src/adapter.ts'
 import { apply } from '../src/index.ts'
-import { context, configOf, requestOf, drain } from './support/host.ts'
+import { Config, type LiveConfig, type OpencodeGoConfig } from '../src/config.ts'
+import { FreeBunTransport } from '../src/free-transport.ts'
+import { parseGoModelCatalog } from '../src/contracts.ts'
+import { context, configOf, requestOf, drain, mountRemotes, invokeRemote } from './support/host.ts'
 import { mockGateway, listingBody, textEvents } from './support/gateway.ts'
 import { modelsDocument, modelEntry } from './support/data.ts'
 
@@ -15,11 +18,12 @@ describe('dual route registration', () => {
     else vi.stubEnv('OPENCODE_API_KEY', key)
     const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
     const ctx = context(); await ctx.plugin(LlmRuntime)
-    apply(ctx, configOf(gateway.url, { freeBaseURL: gateway.url }))
+    apply(ctx, configOf(gateway.url, { freeEnabled: true, freeBaseURL: gateway.url }))
     expect(ctx.llm.listProviders()).toEqual([{ id: 'dsh-opencode-free', name: 'DSH OpenCode Free' }])
     gateway.pushCompletions({ events: textEvents })
     expect((await drain(ctx.llm.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
     expect(gateway.headers.at(-1)?.authorization).toBe('Bearer public')
+    expect(gateway.headers.at(-1)?.['user-agent']).toBe('opencode/latest/2.2.5/cli')
     expect(gateway.headers[0]?.authorization).toBeUndefined()
   })
   it('withdraws both routes while disabled even when credentials exist', async () => {
@@ -28,33 +32,194 @@ describe('dual route registration', () => {
     apply(ctx, configOf('https://gateway.example/v1', { enabled: false }))
     expect(ctx.llm.listProviders()).toEqual([])
   })
-  it('keeps overlapping ids under both route identities and shares configured credentials', async () => {
+  it('keeps overlapping ids under both route identities and shares credentials with a same-origin Free endpoint', async () => {
     vi.stubEnv('OPENCODE_API_KEY', 'configured-key')
-    const go = await mockGateway({ status: 200, body: listingBody(['beam-free', 'go-only']) })
-    const free = await mockGateway({ status: 200, body: modelsDocument({ 'beam-free': modelEntry(), paid: modelEntry({ cost: { text: { input: { price: 1 }, output: { price: 0 } } } }) }) })
+    const gateway = await mockGateway({ status: 200, body: modelsDocument({
+      'beam-free': modelEntry(),
+      'go-only': modelEntry({ cost: { text: { input: { price: 1 }, output: { price: 0 } } } }),
+    }) })
     const ctx = context(); await ctx.plugin(LlmRuntime)
-    apply(ctx, configOf(go.url, { freeBaseURL: free.url }))
+    apply(ctx, configOf(gateway.url, { freeEnabled: true, freeBaseURL: gateway.url }))
     expect(ctx.llm.listProviders()).toEqual(expect.arrayContaining([
       { id: 'dsh-opencode-go', name: 'Default' }, { id: 'dsh-opencode-free', name: 'DSH OpenCode Free' },
     ]))
     expect((await ctx.llm.listModels('dsh-opencode-go')).map(model => model.id)).toEqual(['beam-free', 'go-only'])
     expect(await ctx.llm.listModels('dsh-opencode-free')).toEqual([expect.objectContaining({ provider: 'dsh-opencode-free', id: 'beam-free' })])
-    free.pushCompletions({ events: textEvents }); go.pushCompletions({ events: textEvents })
+    gateway.pushCompletions({ events: textEvents }); gateway.pushCompletions({ events: textEvents })
     await drain(ctx.llm.stream(freeRequest()))
     await drain(ctx.llm.stream({ ...freeRequest(), provider: 'dsh-opencode-go' }))
-    expect(free.headers.at(-1)?.authorization).toBe('Bearer configured-key')
-    expect(go.headers.at(-1)?.authorization).toBe('Bearer configured-key')
+    const freeHeaders = gateway.headers.filter(headers => headers['user-agent'] === 'opencode/latest/2.2.5/cli')
+    const goHeaders = gateway.headers.filter(headers => typeof headers['user-agent'] === 'string'
+      && headers['user-agent'].includes('deepseek-harness/'))
+    expect(freeHeaders.at(-1)?.authorization).toBe('Bearer configured-key')
+    expect(goHeaders.at(-1)?.authorization).toBe('Bearer configured-key')
+    expect(freeHeaders.at(-1)?.['user-agent']).toBe('opencode/latest/2.2.5/cli')
     expect((await ctx.llm.discoverModels('llm-opencode-go', { provider: 'dsh-opencode-free' })).map(model => model.id)).toEqual(['beam-free'])
   })
   it('activates Go when any configured account is usable even if automatic retry is off', async () => {
     vi.stubEnv('ACCOUNT_A', undefined); vi.stubEnv('ACCOUNT_B', 'backup-key')
     const ctx = context(); await ctx.plugin(LlmRuntime)
-    apply(ctx, configOf('https://gateway.example/v1', { apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: false }))
+    apply(ctx, configOf('https://gateway.example/v1', { freeEnabled: true, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: false }))
     expect(ctx.llm.listProviders().map(provider => provider.id).sort()).toEqual(['dsh-opencode-free', 'dsh-opencode-go'])
   })
 })
 
+describe('Free transport stream budget', () => {
+  it('passes the request stream idle budget to the Free transport so the SOCKS relay outlives it', async () => {
+    vi.stubEnv('OPENCODE_API_KEY', undefined)
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    const ctx = context(); await ctx.plugin(LlmRuntime)
+    apply(ctx, configOf(gateway.url, { freeEnabled: true, freeBaseURL: gateway.url, streamIdleTimeoutMs: 5000 }))
+    const forProxy = vi.spyOn(FreeBunTransport.prototype, 'forProxy')
+    try {
+      gateway.pushCompletions({ events: textEvents })
+      await drain(ctx.llm.stream(freeRequest()))
+      // The relay derives its idle limit from this per-request budget; losing
+      // the second argument would silently restore a budget-independent relay.
+      expect(forProxy).toHaveBeenCalledWith('', 5000)
+    } finally { forProxy.mockRestore() }
+  })
+})
+
+describe('Free endpoint credential binding', () => {
+  it.each([
+    ['the official platform', 'https://opencode.ai/inference/v1', 'https://opencode.ai/inference/go/v1', true],
+    ['an official Free endpoint with a custom Go gateway', 'https://opencode.ai/inference/v1', 'https://go.example/v1', true],
+    ['the official platform with an upper-case host', 'https://OPENCODE.AI/inference/v1', 'https://go.example/v1', true],
+    ['the official platform on its explicit default port', 'https://opencode.ai:443/inference/v1', 'https://go.example/v1', true],
+    ['the official host over plain HTTP', 'http://opencode.ai/inference/v1', 'https://opencode.ai/inference/go/v1', false],
+    ['the official host on a non-default port', 'https://opencode.ai:8443/inference/v1', 'https://opencode.ai/inference/go/v1', false],
+    ['a hostname that merely contains the official host', 'https://opencode.ai.example.com/inference/v1', 'https://gateway.example/v1', false],
+    ['a Free endpoint sharing the Go origin', 'https://gateway.example/v1', 'https://gateway.example/v1', true],
+    ['a Free endpoint on another host', 'https://free.example/v1', 'https://gateway.example/v1', false],
+    ['a Free endpoint on another port', 'https://gateway.example:8443/v1', 'https://gateway.example/v1', false],
+    ['a Free endpoint on another scheme', 'http://gateway.example/v1', 'https://gateway.example/v1', false],
+    ['an unparseable Free endpoint', 'not-a-url', 'https://gateway.example/v1', false],
+  ])('binds saved keys with %s', (_label, freeBaseURL, baseURL, expected) => {
+    expect(freeReusesSavedKeys({ freeBaseURL, baseURL })).toBe(expected)
+  })
+
+  it('withholds saved keys from a Free endpoint outside the Go origin and sends public access', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    const resolveApiKey = vi.fn(async () => 'saved-key')
+    const onAccountSettled = vi.fn(), onFreeCredentialWithheld = vi.fn()
+    const adapter = new OpencodeGoAdapter({
+      source: 'free', resolveApiKey, onAccountSettled, onFreeCredentialWithheld,
+      config: () => configOf('https://go.example/v1', { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: true }),
+    })
+    try {
+      gateway.pushCompletions({ events: textEvents })
+      expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+      expect(gateway.headers.at(-1)?.authorization).toBe('Bearer public')
+      expect(resolveApiKey).not.toHaveBeenCalled()
+      expect(onFreeCredentialWithheld).toHaveBeenCalledOnce()
+      expect(onFreeCredentialWithheld.mock.calls[0]?.[0]).toEqual({ reason: 'unbound-free-endpoint', freeBaseURL: gateway.url })
+      expect(onAccountSettled).not.toHaveBeenCalled()
+    } finally { await adapter.dispose() }
+  })
+
+  it('reuses saved keys when the Free endpoint shares the Go origin, including autoSwitch', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    const resolveApiKey = vi.fn(async (current: { apiKeyEnv: string }) =>
+      current.apiKeyEnv === 'ACCOUNT_B' ? 'backup-key' : undefined)
+    const onFreeCredentialWithheld = vi.fn()
+    const config = configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: true })
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => config, resolveApiKey, onFreeCredentialWithheld })
+    try {
+      gateway.pushCompletions({ events: textEvents })
+      expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+      expect(gateway.headers.at(-1)?.authorization).toBe('Bearer backup-key')
+      expect(onFreeCredentialWithheld).not.toHaveBeenCalled()
+    } finally { await adapter.dispose() }
+  })
+})
+
+describe('Free channel opt-in', () => {
+  it('keeps the Free route, its models and its catalog off by default', async () => {
+    vi.stubEnv('OPENCODE_API_KEY', undefined)
+    const go = await mockGateway({ status: 200, body: listingBody(['go-only']) })
+    const free = await mockGateway({ status: 200, body: modelsDocument({ 'beam-free': modelEntry() }) })
+    const ctx = context(); await mountRemotes(ctx); await ctx.plugin(LlmRuntime)
+    apply(ctx, configOf(go.url, { freeBaseURL: free.url }))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    // No Go key and no Free opt-in: neither route exists, so onboarding never
+    // mistakes Free for a usable provider by default.
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(free.paths).toEqual([])
+    await expect(ctx.llm.discoverModels('llm-opencode-go', { provider: 'dsh-opencode-free' }))
+      .rejects.toMatchObject({ code: 'DISCOVERY_UNSUPPORTED' })
+    // The settings model directory must not carry Free models while disabled.
+    const directory = parseGoModelCatalog(await invokeRemote(ctx, { namespace: 'opencodeGoModels', method: 'read', args: {} }))
+    expect(directory.models.filter(model => model.source === 'free')).toEqual([])
+    expect(free.paths).toEqual([])
+  })
+
+  it('registers the Free route when the opt-in is enabled in configuration', async () => {
+    vi.stubEnv('OPENCODE_API_KEY', undefined)
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    const ctx = context(); await ctx.plugin(LlmRuntime)
+    apply(ctx, configOf('https://gateway.example/v1', { freeEnabled: true, freeBaseURL: gateway.url }))
+    await vi.waitFor(() => expect(ctx.llm.listProviders()).toEqual([{ id: 'dsh-opencode-free', name: 'DSH OpenCode Free' }]))
+    expect((await ctx.llm.listModels('dsh-opencode-free')).map(model => model.id)).toEqual(['beam-free'])
+  })
+
+  it('applies freeEnabled changes at runtime and lets a running stream finish', async () => {
+    vi.stubEnv('OPENCODE_API_KEY', undefined)
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    let config = configOf(gateway.url, { freeBaseURL: gateway.url, freeEnabled: false })
+    const ctx = context(); await ctx.plugin(LlmRuntime)
+    const live = Object.fromEntries(Object.keys(Config()).map(key => [key, { get: () => config[key as keyof OpencodeGoConfig] }])) as LiveConfig
+    apply(ctx, live)
+    expect(ctx.llm.listProviders()).toEqual([])
+
+    config = { ...config, freeEnabled: true }
+    ctx.emit('loader/volatile-update', [])
+    await vi.waitFor(() => expect(ctx.llm.listProviders()).toEqual([{ id: 'dsh-opencode-free', name: 'DSH OpenCode Free' }]))
+
+    gateway.pushCompletions({ events: textEvents, delayMs: 20 })
+    const streaming = drain(ctx.llm.stream(freeRequest()))
+    await vi.waitFor(() => expect(gateway.paths).toContain('/chat/completions'), { timeout: 5000 })
+
+    // Withdraw the route while the request is running: the stream keeps its
+    // captured adapter generation and is allowed to finish.
+    config = { ...config, freeEnabled: false }
+    ctx.emit('loader/volatile-update', [])
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect((await streaming).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+
+    await expect(ctx.llm.discoverModels('llm-opencode-go', { provider: 'dsh-opencode-free' }))
+      .rejects.toMatchObject({ code: 'DISCOVERY_UNSUPPORTED' })
+  })
+})
+
 describe('Free credential selection and multi-account retry', () => {
+  it('releases the worker when SSE finishes before the HTTP connection closes', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    let closed = false
+    gateway.pushCompletions({ events: textEvents, hangOpen: true, onClose: () => { closed = true } })
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url }), resolveApiKey: async () => undefined })
+    try {
+      expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+      await vi.waitFor(() => expect(closed).toBe(true))
+    } finally { await adapter.dispose() }
+  })
+  it('preserves actual tool declarations, streamed calls and token usage through Bun', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url }), resolveApiKey: async () => undefined })
+    const tools = [{ name: 'lookup', description: 'Look up a path', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }]
+    gateway.pushCompletions({ events: [
+      JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_lookup', type: 'function', function: { name: 'lookup', arguments: '{"path":"/tmp/demo"}' } }] }, finish_reason: null }] }),
+      JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 } }),
+      '[DONE]',
+    ] })
+    const chunks = await drain(adapter.stream({ ...freeRequest(), tools }))
+    expect(gateway.bodies[0]).toMatchObject({ tools: [{ type: 'function', function: { name: 'lookup', parameters: tools[0]!.parameters } }] })
+    expect((gateway.bodies[0] as { tools: unknown[] }).tools).toHaveLength(1)
+    expect(chunks).toContainEqual(expect.objectContaining({ type: 'block-end', block: expect.objectContaining({ type: 'tool-call', name: 'lookup', arguments: '{"path":"/tmp/demo"}' }) }))
+    expect(chunks).toContainEqual({ type: 'usage', usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 } })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+    await adapter.dispose()
+  })
   it.each([false, true].flatMap(autoSwitch => ['unreadable', 'pending'].map(backup => ({ autoSwitch, backup }))))(
     'uses the primary without reading an unused $backup backup, autoSwitch=$autoSwitch', async ({ autoSwitch, backup }) => {
       const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
@@ -93,9 +258,9 @@ describe('Free credential selection and multi-account retry', () => {
     expect(onAccountSettled).not.toHaveBeenCalled()
     expect(gateway.headers.at(-1)?.authorization).toBe('Bearer public')
   })
-  it('retries quota failures with the next saved key and remembers rejection on this gateway', async () => {
+  it.each(['GoUsageLimitError'])('retries %s with the next saved key and remembers rejection on this gateway', async type => {
     const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
-    gateway.pushCompletions({ status: 401, body: '{"error":{"type":"GoUsageLimitError","message":"usage limit"}}' })
+    gateway.pushCompletions({ status: 429, body: JSON.stringify({ error: { type, message: 'usage limit' } }) })
     gateway.pushCompletions({ events: textEvents }); gateway.pushCompletions({ events: textEvents })
     const resolveApiKey = vi.fn(async (current: { apiKeyEnv: string }) => {
       if (current.apiKeyEnv === 'ACCOUNT_A') return 'key-a'
@@ -109,24 +274,111 @@ describe('Free credential selection and multi-account retry', () => {
     expect(gateway.headers.filter((_, index) => gateway.paths[index] === '/chat/completions').map(headers => headers.authorization)).toEqual(['Bearer key-a', 'Bearer key-b', 'Bearer key-b'])
     expect(resolveApiKey.mock.calls.map(([current]) => current.apiKeyEnv)).toEqual(['ACCOUNT_A', 'ACCOUNT_B', 'ACCOUNT_B'])
   })
-  it('preserves a gateway failure when backups have no key and retries the cooled key on the next request', async () => {
+  it('does not rotate accounts for a shared Free quota, even when its message mentions OpenCode', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    gateway.pushCompletions({ status: 429, body: JSON.stringify({ type: 'error', error: {
+      type: 'FreeUsageLimitError',
+      message: 'Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go',
+    } }) })
+    gateway.pushCompletions({ events: textEvents })
+    gateway.pushCompletions({ events: textEvents })
+    const resolveApiKey = vi.fn(async (config: { apiKeyEnv: string }) => config.apiKeyEnv === 'ACCOUNT_A' ? 'primary-key' : 'backup-key')
+    const adapter = new OpencodeGoAdapter({ source: 'free',
+      config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: true }), resolveApiKey })
+    expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: 'FREE_QUOTA' } } })
+    expect(gateway.bodies).toHaveLength(1)
+    await expect(drain(adapter.stream(freeRequest()))).rejects.toMatchObject({ code: 'FREE_COOLDOWN' })
+    expect(resolveApiKey.mock.calls.map(([current]) => current.apiKeyEnv)).toEqual(['ACCOUNT_A'])
+    expect(gateway.headers.filter((_, index) => gateway.paths[index] === '/chat/completions').map(headers => headers.authorization))
+      .toEqual(['Bearer primary-key'])
+  })
+  it('uses public when backups have no key and revisits the saved key on the next request', async () => {
     const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
     gateway.pushCompletions({ status: 401, body: '{"error":{"message":"invalid key"}}' })
     gateway.pushCompletions({ events: textEvents })
+    gateway.pushCompletions({ events: textEvents })
+    const onAccountSettled = vi.fn()
     const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: true }),
-      resolveApiKey: async current => current.apiKeyEnv === 'ACCOUNT_A' ? 'primary-key' : undefined })
-    expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: 'INVALID_CREDENTIAL' } } })
+      resolveApiKey: async current => current.apiKeyEnv === 'ACCOUNT_A' ? 'primary-key' : undefined, onAccountSettled })
+    const chunks = await drain(adapter.stream(freeRequest()))
+    expect(chunks.filter(chunk => chunk.type === 'finish')).toEqual([expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } })])
+    expect(onAccountSettled).not.toHaveBeenCalled()
+    expect(gateway.bodies[0]).toEqual(gateway.bodies[1])
     expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
     expect(gateway.headers.filter((_, index) => gateway.paths[index] === '/chat/completions').map(headers => headers.authorization))
-      .toEqual(['Bearer primary-key', 'Bearer primary-key'])
+      .toEqual(['Bearer primary-key', 'Bearer public', 'Bearer primary-key'])
   })
-  it('does not retry a configured key as public or switch accounts when automatic retry is off', async () => {
+  it.each(['invalid key', 'unauthorized'])('retries a rejected saved key as public once when automatic account switching is off: %s', async message => {
     const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
-    gateway.pushCompletions({ status: 401, body: '{"error":{"message":"invalid key"}}' })
-    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: false }), resolveApiKey: async () => 'saved-key' })
-    expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+    gateway.pushCompletions({ status: 401, body: JSON.stringify({ error: { message } }) })
+    gateway.pushCompletions({ events: textEvents })
+    const resolveApiKey = vi.fn(async () => 'saved-key'), onAccountSettled = vi.fn()
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: false }), resolveApiKey, onAccountSettled })
+    const chunks = await drain(adapter.stream(freeRequest()))
+    expect(chunks.filter(chunk => chunk.type === 'finish')).toEqual([expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } })])
+    expect(resolveApiKey.mock.calls).toHaveLength(1)
+    expect(onAccountSettled).not.toHaveBeenCalled()
+    const attempts = gateway.headers.filter((_, index) => gateway.paths[index] === '/chat/completions')
+    expect(attempts.map(headers => headers.authorization)).toEqual(['Bearer saved-key', 'Bearer public'])
+    expect(attempts[0]?.['x-opencode-session']).toBe(attempts[1]?.['x-opencode-session'])
+  })
+  it('tries all available saved keys before public and returns a public rejection without retrying it', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    for (let i = 0; i < 3; i++) gateway.pushCompletions({ status: 401, body: '{"error":{"message":"invalid key"}}' })
+    const onAccountSettled = vi.fn()
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: true }),
+      resolveApiKey: async current => current.apiKeyEnv, onAccountSettled })
+    const chunks = await drain(adapter.stream(freeRequest()))
+    expect(chunks).toEqual([expect.objectContaining({ type: 'finish', reason: { kind: 'error', failure: expect.objectContaining({ code: 'INVALID_CREDENTIAL' }) } })])
+    expect(onAccountSettled).not.toHaveBeenCalled()
+    const attempts = gateway.headers.filter((_, index) => gateway.paths[index] === '/chat/completions')
+    expect(attempts.map(headers => headers.authorization)).toEqual(['Bearer ACCOUNT_A', 'Bearer ACCOUNT_B', 'Bearer public'])
+    expect(new Set(attempts.map(headers => headers['x-opencode-session'])).size).toBe(1)
+  })
+  it.each([
+    { status: 403, error: { type: 'RegionError', message: 'Unavailable in region' }, code: 'PERMISSION_DENIED' },
+    { status: 403, error: { type: 'DataPolicyError', message: 'Privacy policy restriction' }, code: 'PERMISSION_DENIED' },
+    { status: 402, error: { message: 'Permission required' }, code: 'PERMISSION_DENIED' },
+    { status: 429, error: { type: 'FreeUsageLimitError', message: 'Free limit reached' }, code: 'FREE_QUOTA' },
+  ])('preserves $code without public retry', async ({ status, error, code }) => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    gateway.pushCompletions({ status, body: JSON.stringify({ error }) })
+    gateway.pushCompletions({ events: textEvents })
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts,
+      autoSwitch: code === 'PERMISSION_DENIED' }), resolveApiKey: async current => current.apiKeyEnv })
+    expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: {
+      code, message: expect.stringContaining(error.message),
+    } } })
     expect(gateway.bodies).toHaveLength(1)
-    expect(gateway.headers.at(-1)?.authorization).toBe('Bearer saved-key')
+    if (code === 'FREE_QUOTA') await expect(drain(adapter.stream(freeRequest()))).rejects.toMatchObject({ code: 'FREE_COOLDOWN' })
+    else await drain(adapter.stream(freeRequest()))
+    expect(gateway.headers.filter((_, index) => gateway.paths[index] === '/chat/completions').map(headers => headers.authorization))
+      .toEqual(code === 'FREE_QUOTA' ? ['Bearer ACCOUNT_A'] : ['Bearer ACCOUNT_A', 'Bearer ACCOUNT_A'])
+  })
+  it.each(['output', 'usage', 'aborted'] as const)('does not retry a rejected key as public after %s', async mode => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    const controller = new AbortController()
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: true }),
+      resolveApiKey: async () => 'saved-key' })
+    const attempt = vi.spyOn(OpencodeGoRequestExecutor.prototype, 'stream').mockImplementation(async function* (): AsyncIterable<StreamChunk> {
+      if (mode === 'output') yield { type: 'text-delta', index: 0, text: 'partial' }
+      if (mode === 'usage') yield { type: 'usage', usage: { inputTokens: 3, outputTokens: 0, totalTokens: 3 } }
+      if (mode === 'aborted') controller.abort()
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH', message: 'Rejected' } } }
+    })
+    await drain(adapter.stream({ ...freeRequest(), signal: controller.signal }))
+    expect(attempt).toHaveBeenCalledOnce()
+  })
+  it.each(['AUTH', 'INVALID_CREDENTIAL'])('uses public once after a thrown %s credential rejection', async code => {
+    const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })
+    const adapter = new OpencodeGoAdapter({ source: 'free', config: () => configOf(gateway.url, { freeBaseURL: gateway.url, apiKeyEnv: 'ACCOUNT_A', accounts, autoSwitch: false }),
+      resolveApiKey: async () => 'saved-key' })
+    const attempt = vi.spyOn(OpencodeGoRequestExecutor.prototype, 'stream').mockImplementation(async function* (_options, snapshot): AsyncIterable<StreamChunk> {
+      if (snapshot.apiKey !== 'public') throw new LlmError('Rejected', code)
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    expect((await drain(adapter.stream(freeRequest()))).at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(attempt.mock.calls.map(([, snapshot]) => snapshot.apiKey)).toEqual(['saved-key', 'public'])
   })
   it('does not mistake a credential-service failure for an unconfigured public account', async () => {
     const gateway = await mockGateway({ status: 200, body: listingBody(['beam-free']) })

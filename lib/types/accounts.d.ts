@@ -33,9 +33,9 @@ export interface AttemptOutcome {
     aborted: boolean;
     hasNext: boolean;
 }
-/** Switching accounts must never replay output or already charged work. */
+/** Switching accounts must never replay output, charged work or model permission failures. */
 export declare function accountFallback(outcome: AttemptOutcome): GoAccountSwitch['reason'] | undefined;
-/** Gateway credential, rate and quota failures cool down this account for five minutes. */
+/** Only credential, rate and quota failures cool down a key; PERMISSION_DENIED is model-scoped. */
 export declare function isGatewayKeyRejection(failure: {
     code: string;
 }): boolean;
@@ -49,6 +49,7 @@ export declare class GoAccountManager {
     private generation;
     private signature;
     private credentialGeneration;
+    private settingsGeneration;
     private latestSeq;
     private notice;
     constructor(config: () => OpencodeGoConfig, logger: {
@@ -60,6 +61,13 @@ export declare class GoAccountManager {
     private write;
     execute(raw: AccountCommand): Promise<SettingsWriteResult>;
     private executeCommand;
+    /**
+     * The Host announces every revision of this profile entry, including edits
+     * made outside this manager (forms, native config, `A -> C -> A` round
+     * trips). Counting them keeps `capture()` free of `settings.describe()`,
+     * which deep-clones every namespace, on request and usage-poll hot paths.
+     */
+    settingsChanged(): void;
     /** A freshness fence prevents an old request from overriding a later user choice. */
     capture(): number;
     credentialChanged(): void;

@@ -13,6 +13,10 @@ export declare const DEFAULT_REQUEST_PREPARATION_TIMEOUT_MS = 60000;
 export declare const DEFAULT_REQUEST_TIMEOUT_MS: number;
 /** Plain configuration values used by validation and direct adapter consumers. */
 export declare const PlainConfig: z<OpencodeGoConfig>;
+/** Derive defaults from the same schema used by persisted profile settings. */
+export declare const DEFAULT_CONFIG: Readonly<OpencodeGoConfig>;
+/** Fill omitted profile fields and normalize the legacy official gateway. */
+export declare function normalizeConfig(value?: Partial<OpencodeGoConfig>): OpencodeGoConfig;
 /** The Loader retains these references when profile fields change. */
 export type LiveConfig = {
     [K in keyof OpencodeGoConfig]-?: {
@@ -23,10 +27,14 @@ export declare const Config: z<Partial<OpencodeGoConfig>, LiveConfig>;
 /** Keep the Loader's references: reparsing them would detach live updates. */
 export declare function readConfig(config: LiveConfig): OpencodeGoConfig;
 /**
- * Accept only an http(s) base without a query or fragment. Runs at load for
- * the composition layer and as the settings section's write validator, so a
- * bad URL fails where it is written, never at first request.
+ * Accept only an http(s) base without embedded credentials, query or fragment.
+ * Runs at load for the composition layer and as the settings section's write
+ * validator, so a bad URL fails where it is written, never at first request.
+ * Credentials never belong in this URL: `fetch` rejects such URLs outright and
+ * any failure diagnostic could otherwise carry them, so the value is refused
+ * before it can reach a request or a log line.
  * @param raw - the configured base URL.
+ * @param field - configuration field name for the diagnostic.
  * @returns the current gateway base URL without trailing slashes.
  */
 export declare function assertBaseURL(raw: string, field?: 'baseURL' | 'freeBaseURL'): string;

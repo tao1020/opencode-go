@@ -1,20 +1,24 @@
 // @vitest-environment jsdom
-import { apply, accountCommands } from '../src/client/index.ts'
+import { apply, accountCommands, inject as clientInject } from '../src/client/index.ts'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
-import { bindSnapshotSelector, createConfigForm, acceptFormWrites } from './support/client.tsx'
+import { bindSnapshotSelector, createConfigForm, acceptFormWrites, defaultClientSettings, translator } from './support/client.tsx'
 import * as store from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { OpencodeGoSection, type OpencodeGoSectionProps, type OpencodeGoSectionState } from '../src/client/Section.tsx'
 import {
+  NUMERIC_FIELD_LIMITS,
   OpencodeGoSectionController,
+  editableKeys,
   type OpencodeGoSettings,
-  type OpencodeGoSectionFace,
+  type TextField,
 } from '../src/client/controller.ts'
-import { en, getGoTheme, setGoTheme, zh, type OpencodeGoKey } from '../src/client/presentation.ts'
-import type { AnalyticsQuery, AnalyticsReport } from '../src/contracts.ts'
+import { en, zh, type OpencodeGoKey } from '../src/client/presentation.ts'
+import { MAX_THINKING_BUDGET_TOKENS, type AnalyticsQuery } from '../src/contracts.ts'
+import { createAnalyticsReport } from './support/analytics.ts'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import * as React from 'react'
 import * as jsx from 'react/jsx-runtime'
@@ -22,7 +26,7 @@ import { Context } from '@deepseek-ai/cordis'
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 import type { LocaleRuntime as HostLocaleRuntime, LocaleSettings } from '@deepseek-ai/dsh-client-locale/client'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
-import { UsagePill, type UsagePillProps } from '../src/client/UsagePill.tsx'
+import { UsagePill, SidebarQuota, type UsagePillProps, type SidebarQuotaProps } from '../src/client/UsagePill.tsx'
 
 describe("settings page and typed capacity editing", () => {
 
@@ -37,22 +41,25 @@ describe("settings page and typed capacity editing", () => {
   }
 
   type SectionField = 'baseURL' | 'freeBaseURL' | 'proxyURL' | 'refreshMinutes' | 'streamIdleTimeoutMs'
-    | 'usageDisplay'
+    | 'requestPreparationTimeoutMs' | 'requestTimeoutMs'
+    | 'usageDisplay' | 'usagePillStyle' | 'appearanceTheme' | 'showSidebarQuota' | 'freeEnabled'
     | 'maxImages'
     | 'maxRequestImageBytes' | 'requestImagePixelBudget' | 'requestImageMaxBytes' | 'models'
     | 'modelLimits' | 'modelLimitDraft'
 
   const settled: Omit<OpencodeGoSectionState, SectionField> = {
-    available: true,
+    status: 'ready',
     writable: true,
     dirty: false,
     invalid: false,
     saving: false,
     failed: false,
     enabled: true,
+    appliedAppearanceTheme: 'native',
     modelVisibility: {},
     pickerSaving: false,
     pickerFailed: false,
+    enabledFailed: false,
     accounts: { entries: [], activeRef: 'OPENCODE_API_KEY', autoSwitch: false, busy: false, blocked: false, refreshing: false },
   }
 
@@ -71,11 +78,17 @@ describe("settings page and typed capacity editing", () => {
     return {
       ...settled,
       usageDisplay: field('auto'),
+      usagePillStyle: field('badge'),
+      appearanceTheme: field('native'),
+      showSidebarQuota: field('false'),
+      freeEnabled: field('false'),
       freeBaseURL: field('https://opencode.ai/inference/v1'),
       baseURL: field('https://opencode.ai/zen/go/v1'),
       proxyURL: field(''),
       refreshMinutes: field('60'),
       streamIdleTimeoutMs: field('300000'),
+      requestPreparationTimeoutMs: field('60000'),
+      requestTimeoutMs: field('1800000'),
       maxImages: field(''),
       maxRequestImageBytes: field('20971520'),
       requestImagePixelBudget: field('4194304'),
@@ -111,14 +124,14 @@ describe("settings page and typed capacity editing", () => {
   function renderSection(
     state: OpencodeGoSectionState,
     overrides: Partial<ReturnType<typeof actions>> = {},
-    options: { foldedModels?: boolean; analytics?: { readAnalytics?: (query: AnalyticsQuery) => Promise<AnalyticsReport> } } = {},
+    options: { foldedModels?: boolean; locale?: 'en' | 'zh' } = {},
   ) {
     const store = createSnapshotStore(state)
     const props = {
       ...actions(),
       ...overrides,
-      ...(options.analytics ?? {}),
-      t,
+      t: options.locale ? translator(options.locale) : t,
+      getLocale: () => options.locale === 'zh' ? 'zh-CN' : 'en-US',
       useOpencodeGo: bindSnapshotSelector(store),
     } as unknown as OpencodeGoSectionProps
     render(<OpencodeGoSection {...props} />)
@@ -128,19 +141,113 @@ describe("settings page and typed capacity editing", () => {
     return store
   }
 
-  /** The page's advanced disclosure starts collapsed; open it before its fields. */
-  function openAdvanced(): void {
-    fireEvent.click(screen.getByText(en.advancedLabel))
+  type SettingsTabId = 'overview' | 'models' | 'appearance' | 'advanced'
+
+  /** Select a settings tab by id so the helper works in either locale. */
+  function selectTab(tab: SettingsTabId): void {
+    const button = document.getElementById(`opencode-go-tab-${tab}`)
+    if (button !== null) fireEvent.click(button)
   }
 
-  /** The model card ships folded; open it before its list and its capacities. */
+  /** Tuning fields live in the advanced tab. */
+  function openAdvanced(): void {
+    selectTab('advanced')
+  }
+
+  /** Model list and capacities live in the models tab. */
   function openModelLimits(): void {
-    // Nothing is served in the unavailable posture, and then there is no card.
-    const trigger = document.querySelector('[aria-controls="opencode-go-models"]')
+    // Nothing is served in the unavailable posture, and then there is no tab strip.
+    const trigger = document.getElementById('opencode-go-tab-models')
     if (trigger !== null) fireEvent.click(trigger)
   }
 
   describe('OpencodeGoSection', () => {
+    it('keeps appearance on its own tab and stages all three edits', () => {
+      const reading = actions()
+      renderSection(stateOf(), reading, { foldedModels: true })
+      expect(screen.queryByRole('switch', { name: en.showSidebarQuotaLabel })).toBeNull()
+      expect(screen.queryByRole('radiogroup', { name: en.appearanceThemeLabel })).toBeNull()
+      expect(screen.queryByRole('radiogroup', { name: en.usagePillStyleLabel })).toBeNull()
+      selectTab('appearance')
+      const panel = document.getElementById('opencode-go-panel-appearance') as HTMLElement
+      expect(panel.textContent).toContain(en.usageDisplayLabel)
+      const theme = screen.getByRole('radiogroup', { name: en.appearanceThemeLabel })
+      expect(panel.contains(theme)).toBe(true)
+      expect(within(theme).getByRole<HTMLInputElement>('radio', { name: en.appearanceTheme_native }).checked).toBe(true)
+      fireEvent.click(within(theme).getByRole('radio', { name: en.appearanceTheme_classic }))
+      expect(reading.edit).toHaveBeenCalledWith('appearanceTheme', 'classic')
+      const toggle = screen.getByRole('switch', { name: en.showSidebarQuotaLabel })
+      expect(toggle.getAttribute('aria-checked')).toBe('false')
+      fireEvent.click(toggle)
+      expect(reading.edit).toHaveBeenCalledWith('showSidebarQuota', 'true')
+      const group = screen.getByRole('radiogroup', { name: en.usagePillStyleLabel })
+      expect(within(group).getByRole<HTMLInputElement>('radio', { name: en.usagePillStyle_badge }).checked).toBe(true)
+      fireEvent.click(within(group).getByRole('radio', { name: en.usagePillStyle_plain }))
+      expect(reading.edit).toHaveBeenCalledWith('usagePillStyle', 'plain')
+      expect(reading.save).not.toHaveBeenCalled()
+    })
+
+    it('keeps the applied page theme Native while a Classic draft is only previewed', () => {
+      renderSection(stateOf({ appearanceTheme: field('classic'), appliedAppearanceTheme: 'native' }), {}, { foldedModels: true })
+      const page = document.querySelector('[style*="--go-bg"]') as HTMLElement
+      expect(page.style.getPropertyValue('--go-display-font')).toContain('--dsw-font-family')
+      selectTab('appearance')
+      const theme = screen.getByRole('radiogroup', { name: en.appearanceThemeLabel })
+      expect(within(theme).getByRole<HTMLInputElement>('radio', { name: en.appearanceTheme_classic }).checked).toBe(true)
+      const previews = within(theme).getAllByText(`${en.usageRollingShort} 24% · ${en.usageWeekShort} 48%`)
+      expect(previews.some(sample => sample.parentElement?.style.getPropertyValue('--go-display-font').includes('Anthropic Serif'))).toBe(true)
+      expect(page.style.getPropertyValue('--go-display-font')).toContain('--dsw-font-family')
+    })
+
+    it('disables appearance changes for read-only settings and resets saved appearance overrides', () => {
+      const reading = actions()
+      const state = stateOf({ appearanceTheme: field('classic', { overridden: true }), showSidebarQuota: field('true', { overridden: true }), usagePillStyle: field('plain', { overridden: true }) })
+      const store = renderSection(state, reading)
+      selectTab('appearance')
+      fireEvent.click(screen.getByRole('button', { name: en.usageAppearanceReset }))
+      expect(reading.resetField.mock.calls).toEqual([['appearanceTheme'], ['showSidebarQuota'], ['usagePillStyle']])
+      act(() => { store.set({ ...state, writable: false }) })
+      expect(screen.getByRole<HTMLButtonElement>('switch', { name: en.showSidebarQuotaLabel }).disabled).toBe(true)
+      for (const radio of within(screen.getByRole('radiogroup', { name: en.appearanceThemeLabel })).getAllByRole<HTMLInputElement>('radio')) {
+        expect(radio.disabled).toBe(true)
+      }
+      for (const radio of within(screen.getByRole('radiogroup', { name: en.usagePillStyleLabel })).getAllByRole<HTMLInputElement>('radio')) {
+        expect(radio.disabled).toBe(true)
+      }
+    })
+
+    it.each((['en', 'zh'] as const).flatMap(locale => [384_000, 65_536, 32_768, undefined].map(maxTokens => ({ locale, maxTokens }))))(
+      'shows the effective output default and catalog maximum in $locale for $maxTokens tokens', ({ locale, maxTokens }) => {
+        const translate = translator(locale)
+        renderSection(stateOf({ models: listing([{ id: 'capacity', name: 'Capacity', contextWindow: 1_000_000, maxTokens }]) }), {}, { locale })
+        const output = screen.getByRole<HTMLInputElement>('spinbutton', { name: translate('limitsOutputLabel', { name: 'Capacity' }) })
+        expect(output.value).toBe('')
+        expect(output.placeholder).toBe(maxTokens === undefined ? translate('capacityMissing') : String(Math.min(maxTokens, 65_536)))
+        expect(output.getAttribute('max')).toBe(maxTokens === undefined ? null : String(maxTokens))
+        const hint = document.getElementById(output.getAttribute('aria-describedby')!)!.textContent
+        const expected = maxTokens !== undefined && maxTokens > 65_536
+          ? locale === 'zh' ? '默认：65,536 tokens（模型上限：384,000 tokens）' : 'Default: 65,536 tokens (catalog max: 384,000 tokens)'
+          : translate('capacityDefault', { value: maxTokens?.toLocaleString(locale) ?? translate('capacityMissing') })
+        expect(hint).toBe(expected)
+        const context = screen.getByRole<HTMLInputElement>('spinbutton', { name: translate('limitsContextLabel', { name: 'Capacity' }) })
+        expect(context.placeholder).toBe('1000000')
+        expect(document.getElementById(context.getAttribute('aria-describedby')!)?.textContent)
+          .toBe(translate('capacityDefault', { value: (1_000_000).toLocaleString(locale) }))
+      },
+    )
+
+    it('keeps an explicit max output override and a two-column model row with its override indicator', () => {
+      renderSection(stateOf({ models: listing([{ id: 'wide', name: 'A very long model name', maxTokens: 384_000 }]),
+        modelLimitDraft: { wide: { maxTokens: 98_304 } } }))
+      const output = screen.getByRole<HTMLInputElement>('spinbutton', { name: t('limitsOutputLabel', { name: 'A very long model name' }) })
+      expect(output.value).toBe('98304')
+      expect(output.placeholder).toBe('65536')
+      const choose = screen.getByRole('button', { name: 'A very long model name' })
+      expect(choose.querySelector('[title="' + en.overridden + '"]')).toBeTruthy()
+      expect(Array.from(choose.parentElement!.children).map(child => child.getAttribute('role'))).toEqual([null, 'switch'])
+      expect(screen.getByRole('tabpanel', { name: en.settingsTabModels }).contains(choose)).toBe(true)
+    })
+
     it('stages the independent Free gateway URL in advanced settings and offers reset', () => {
       const reading = actions()
       renderSection(stateOf({ freeBaseURL: field('https://free.example/v1', { overridden: true }) }), reading)
@@ -159,7 +266,7 @@ describe("settings page and typed capacity editing", () => {
       const reading = actions()
       renderSection(stateOf({ usageDisplay: field('always', { overridden: true }) }), reading)
       expect(screen.queryByRole('radiogroup', { name: en.usageDisplayLabel })).toBeNull()
-      openAdvanced()
+      selectTab('appearance')
       const group = screen.getByRole('radiogroup', { name: en.usageDisplayLabel })
       const choices = within(group).getAllByRole('radio')
       expect(choices.map(choice => choice.textContent))
@@ -168,21 +275,43 @@ describe("settings page and typed capacity editing", () => {
       fireEvent.click(choices[2])
       expect(reading.edit).toHaveBeenCalledWith('usageDisplay', 'off')
       expect(reading.save).not.toHaveBeenCalled()
-      fireEvent.click(screen.getByRole('button', { name: en.advancedResetAll }))
+      fireEvent.click(screen.getByRole('button', { name: en.usageAppearanceReset }))
       expect(reading.resetField).toHaveBeenCalledWith('usageDisplay')
     })
 
     it('disables usage display editing in a read-only deployment', () => {
       renderSection(stateOf({ writable: false }))
-      openAdvanced()
+      selectTab('appearance')
       const choices = within(screen.getByRole('radiogroup', { name: en.usageDisplayLabel })).getAllByRole('radio')
       expect(choices.every(choice => (choice as HTMLButtonElement).disabled)).toBe(true)
+    })
+
+    it('stages the Free channel opt-in from the overview, next to the provider switch', () => {
+      const reading = actions()
+      renderSection(stateOf({ freeEnabled: field('true', { overridden: true }) }), reading, { foldedModels: true })
+      const free = screen.getByRole<HTMLButtonElement>('switch', { name: en.freeEnabledLabel })
+      expect(free.getAttribute('aria-checked')).toBe('true')
+      expect(free.title).toBe(en.freeEnabledHint)
+      fireEvent.click(free)
+      expect(reading.edit).toHaveBeenCalledExactlyOnceWith('freeEnabled', 'false')
+      expect(reading.save).not.toHaveBeenCalled()
+
+      // The tuning reset no longer owns the Free channel.
+      selectTab('advanced')
+      fireEvent.click(screen.getByRole('button', { name: en.advancedResetAll }))
+      expect(reading.resetField).not.toHaveBeenCalledWith('freeEnabled')
+      expect(screen.queryByText(en.groupFree)).toBeNull()
+    })
+
+    it('disables the Free channel switch in a read-only deployment', () => {
+      renderSection(stateOf({ writable: false }), {}, { foldedModels: true })
+      expect(screen.getByRole<HTMLButtonElement>('switch', { name: en.freeEnabledLabel }).disabled).toBe(true)
     })
 
     it('moves the segmented selection with the arrow keys', () => {
       const reading = actions()
       renderSection(stateOf({ usageDisplay: field('auto') }), reading)
-      openAdvanced()
+      selectTab('appearance')
       const group = screen.getByRole('radiogroup', { name: en.usageDisplayLabel })
       within(group).getAllByRole('radio')[0].focus()
       fireEvent.keyDown(group, { key: 'ArrowRight' })
@@ -218,20 +347,26 @@ describe("settings page and typed capacity editing", () => {
       expect(document.getElementById(input.getAttribute('aria-describedby') ?? '')?.textContent).toBe(en.baseURLHint)
     })
 
-    it('groups the tuning rows under four headings', () => {
+    it('keeps quota display above the appearance controls and out of the advanced tab', () => {
       renderSection(stateOf())
-      openAdvanced()
-      const text = document.getElementById('opencode-go-advanced')?.textContent ?? ''
+      selectTab('appearance')
+      const appearance = document.getElementById('opencode-go-panel-appearance')?.textContent ?? ''
+      expect(appearance).toContain(en.usageDisplayLabel)
+      expect(appearance).toContain(en.showSidebarQuotaLabel)
+      expect(appearance.indexOf(en.usageDisplayLabel)).toBeLessThan(appearance.indexOf(en.showSidebarQuotaLabel))
+
+      selectTab('advanced')
+      const advanced = document.getElementById('opencode-go-panel-advanced')?.textContent ?? ''
       const order: [string, string][] = [
-        [en.groupUsage, en.usageDisplayLabel],
         [en.groupConnection, en.baseURLLabel],
         [en.groupCacheTimeouts, en.refreshMinutesLabel],
         [en.groupImages, en.maxImagesLabel],
       ]
       for (const [heading, firstRow] of order) {
-        expect(text).toContain(heading)
-        expect(text.indexOf(heading)).toBeLessThan(text.indexOf(firstRow))
+        expect(advanced).toContain(heading)
+        expect(advanced.indexOf(heading)).toBeLessThan(advanced.indexOf(firstRow))
       }
+      expect(advanced).not.toContain(en.usageDisplayLabel)
     })
 
     it('renders nothing until every injected seat is present', () => {
@@ -239,9 +374,18 @@ describe("settings page and typed capacity editing", () => {
       expect(container.innerHTML).toBe('')
     })
 
+    it('shows the loading posture instead of the unavailable one while the Host is answering', () => {
+      const reading = actions()
+      renderSection(stateOf({ status: 'loading' }), reading)
+      expect(screen.getByRole('status').textContent).toBe(en.settingsLoading)
+      expect(screen.queryByText(en.unavailable)).toBeNull()
+      // Nothing is known yet, so there is no listing to ask the gateway for.
+      expect(reading.loadModels).not.toHaveBeenCalled()
+    })
+
     it('shows the unavailable posture while the namespace is not served', () => {
       const reading = actions()
-      renderSection(stateOf({ available: false }), reading)
+      renderSection(stateOf({ status: 'unavailable' }), reading)
       expect(screen.getByText(en.unavailable)).toBeTruthy()
       // Nothing is served, so there is no listing to ask the gateway for.
       expect(reading.loadModels).not.toHaveBeenCalled()
@@ -260,7 +404,7 @@ describe("settings page and typed capacity editing", () => {
 
     it('reflects the switch state and writes the flip straight through', () => {
       const reading = actions()
-      renderSection(stateOf({ enabled: true }), reading)
+      renderSection(stateOf({ enabled: true }), reading, { foldedModels: true })
 
       const control = screen.getByRole('switch', { name: en.enabledLabel })
       expect(control.getAttribute('aria-checked')).toBe('true')
@@ -275,7 +419,7 @@ describe("settings page and typed capacity editing", () => {
     })
 
     it('explains the withdrawn state while the switch is off', () => {
-      renderSection(stateOf({ enabled: false }))
+      renderSection(stateOf({ enabled: false }), {}, { foldedModels: true })
 
       const control = screen.getByRole('switch', { name: en.enabledLabel })
       expect(control.getAttribute('aria-checked')).toBe('false')
@@ -283,7 +427,7 @@ describe("settings page and typed capacity editing", () => {
     })
 
     it('locks the switch with the same read-only document that locks the form', () => {
-      renderSection(stateOf({ writable: false }))
+      renderSection(stateOf({ writable: false }), {}, { foldedModels: true })
 
       expect(screen.getByRole('switch', { name: en.enabledLabel }).hasAttribute('disabled')).toBe(true)
     })
@@ -307,17 +451,17 @@ describe("settings page and typed capacity editing", () => {
         { id: 'old', name: 'Old', deprecated: true }, { id: 'normal', name: 'Normal' },
         { id: 'new', name: 'New', releaseDate: new Date().toISOString().slice(0, 10) },
       ]) }))
-      const nav = () => screen.getByRole('navigation', { name: en.modelsLabel })
-      expect(within(nav()).getAllByRole('button').map(button => button.textContent?.split(' ')[0])).toEqual(['New', 'Normal', 'Old'])
+      const list = () => screen.getByRole('group', { name: en.modelsLabel })
+      expect(within(list()).getAllByRole('button').map(button => button.textContent?.split(' ')[0])).toEqual(['New', 'Normal', 'Old'])
       fireEvent.click(screen.getByRole('button', { name: new RegExp(en.filterDeprecated + ' 1') }))
-      expect(within(nav()).getAllByRole('button')).toHaveLength(1)
+      expect(within(list()).getAllByRole('button')).toHaveLength(1)
       fireEvent.change(screen.getByLabelText(en.limitsFilterLabel), { target: { value: 'new' } })
-      expect(screen.queryByRole('navigation')).toBeNull()
+      expect(screen.queryByRole('group', { name: en.modelsLabel })).toBeNull()
     })
 
     it('shows one selected model editor immediately alongside the searchable list', () => {
       renderSection(stateOf({ models: listing([{ id: 'm', name: 'Model' }]) }))
-      expect(screen.getByRole('navigation', { name: en.modelsLabel })).toBeTruthy()
+      expect(screen.getByRole('group', { name: en.modelsLabel })).toBeTruthy()
       expect(screen.getByLabelText(t('limitsContextLabel', { name: 'Model' }))).toBeTruthy()
       expect(screen.queryByRole('button', { name: en.limitsLabel })).toBeNull()
     })
@@ -345,7 +489,7 @@ describe("settings page and typed capacity editing", () => {
         models: listing([{ id: 'm', name: 'Model' }]),
         modelLimitDraft: { m: { contextWindow: 1024 } },
       }))
-      const nav = screen.getByRole('navigation', { name: en.modelsLabel })
+      const nav = screen.getByRole('group', { name: en.modelsLabel })
       expect(nav.querySelector('[title="' + en.overridden + '"]')).toBeTruthy()
       expect(screen.getByText(t('limitsSummary', { count: 1 }))).toBeTruthy()
     })
@@ -353,7 +497,7 @@ describe("settings page and typed capacity editing", () => {
     it('keeps the compact row to the model name and its badges', () => {
       const today = new Date().toISOString().slice(0, 10)
       renderSection(stateOf({ models: listing([{ id: 'fresh-model', name: 'Fresh', releaseDate: today }]) }))
-      const row = within(screen.getByRole('navigation', { name: en.modelsLabel })).getByRole('button')
+      const row = within(screen.getByRole('group', { name: en.modelsLabel })).getByRole('button')
       expect(row.textContent).toContain('Fresh')
       expect(row.textContent).toContain(en.newBadge)
       // The model id and the release date are the parameter card's job.
@@ -440,50 +584,58 @@ describe("settings page and typed capacity editing", () => {
       expect(screen.queryByRole('button', { name: en.limitsResetAll })).toBeNull()
     })
 
-    it('ships the model card folded and opens it on demand', () => {
+    it('keeps the model editor on its own tab', () => {
       renderSection(stateOf({ models: listing([{ id: 'm', name: 'Model' }]) }), {}, { foldedModels: true })
-      const trigger = screen.getByRole('button', { name: en.modelsLabel })
-      expect(trigger.getAttribute('aria-expanded')).toBe('false')
       expect(document.getElementById('opencode-go-models')).toBeNull()
-      expect(screen.queryByRole('navigation', { name: en.modelsLabel })).toBeNull()
+      expect(screen.queryByRole('group', { name: en.modelsLabel })).toBeNull()
+      const modelsTab = () => screen.getByRole('tab', { name: en.settingsTabModels })
+      expect(modelsTab().getAttribute('aria-selected')).toBe('false')
 
-      fireEvent.click(trigger)
-      expect(trigger.getAttribute('aria-expanded')).toBe('true')
+      selectTab('models')
+      expect(modelsTab().getAttribute('aria-selected')).toBe('true')
       expect(document.getElementById('opencode-go-models')).not.toBeNull()
-      expect(screen.getByRole('navigation', { name: en.modelsLabel })).toBeTruthy()
+      expect(screen.getByRole('group', { name: en.modelsLabel })).toBeTruthy()
 
-      fireEvent.click(trigger)
-      expect(trigger.getAttribute('aria-expanded')).toBe('false')
+      selectTab('overview')
       expect(document.getElementById('opencode-go-models')).toBeNull()
     })
 
-    it('keeps what the model card reports out of the fold', () => {
-      // The card ships folded, so a notice behind it is a notice nobody reads:
-      // the refused switch write and the listing's own diagnostics both show.
+    it('marks the models tab when the list has something to report', () => {
+      // A notice behind another tab is a notice nobody reads: the tab carries a mark,
+      // and the notice itself lives on the models tab.
       renderSection(stateOf({ pickerFailed: true, models: listing([{ id: 'm', name: 'Model' }]) }), {}, { foldedModels: true })
-      expect(screen.getByRole('button', { name: en.modelsLabel }).getAttribute('aria-expanded')).toBe('false')
+      const modelsTab = () => screen.getByRole('tab', { name: en.settingsTabModels })
+      expect(modelsTab().hasAttribute('data-marked')).toBe(true)
+      expect(screen.queryByText(en.pickerFailed)).toBeNull()
+      selectTab('models')
       expect(screen.getByText(en.pickerFailed)).toBeTruthy()
 
       cleanup()
       renderSection(stateOf({ models: { status: 'failed', message: 'offline' } }), {}, { foldedModels: true })
-      expect(screen.getByRole('button', { name: en.modelsLabel }).getAttribute('aria-expanded')).toBe('false')
+      expect(screen.getByRole('tab', { name: en.settingsTabModels }).hasAttribute('data-marked')).toBe(true)
+      selectTab('models')
       expect(screen.getByText(en.modelsFailed)).toBeTruthy()
       expect(screen.getByText('offline')).toBeTruthy()
 
-      // A healthy listing still leaves the folded card with nothing to say.
+      // A healthy listing still leaves the tab unmarked.
       cleanup()
       renderSection(stateOf({ models: listing([{ id: 'm', name: 'Model' }]) }), {}, { foldedModels: true })
+      expect(screen.getByRole('tab', { name: en.settingsTabModels }).hasAttribute('data-marked')).toBe(false)
       expect(screen.queryByRole('alert')).toBeNull()
-      expect(screen.getByRole('button', { name: en.modelsLabel }).textContent).toBe(en.modelsLabel)
     })
 
-    it('keeps the header to the title and the disclosure, with refresh on the filter row', () => {
+    it('groups refresh with the source controls under the tab strip that names the page', () => {
       renderSection(stateOf({ models: listing([{ id: 'm', name: 'Model' }]) }))
-      expect(screen.getByRole('button', { name: en.modelsLabel }).textContent).toBe(en.modelsLabel)
+      // The models tab already says "Models": the card must not repeat it as a heading.
+      expect(screen.queryByRole('heading', { level: 3, name: en.modelsLabel })).toBeNull()
 
       const refresh = screen.getByRole('button', { name: en.modelsRefresh })
+      const sources = screen.getByRole('tablist', { name: en.modelSourcesLabel })
       const filters = screen.getByRole('group', { name: en.filterLabel })
-      expect(filters.contains(refresh)).toBe(true)
+      const toolbar = document.getElementById('opencode-go-models')?.firstElementChild
+      expect(toolbar?.contains(sources)).toBe(true)
+      expect(toolbar?.contains(refresh)).toBe(true)
+      expect(filters.contains(refresh)).toBe(false)
     })
 
     it('closes the model card with the tally on its own row beside the clear action', () => {
@@ -521,7 +673,7 @@ describe("settings page and typed capacity editing", () => {
 
     it('reports a reading listing, an empty listing, and a failed one', () => {
       renderSection(stateOf())
-      expect(screen.getByText(en.modelsLoading)).toBeTruthy()
+      expect(screen.getByRole('status', { name: en.modelsLoading })).toBeTruthy()
 
       cleanup()
       renderSection(stateOf({ models: listing([]) }))
@@ -545,57 +697,54 @@ describe("settings page and typed capacity editing", () => {
       expect(screen.getByText<HTMLButtonElement>(en.modelsRefresh).disabled).toBe(true)
     })
 
-    it('keeps the tuning fields collapsed until the disclosure is opened', () => {
+    it('keeps the tuning fields on the advanced tab, which is marked when customized', () => {
       renderSection(stateOf({ refreshMinutes: field('30', { overridden: true }) }))
 
       expect(screen.queryByLabelText(en.baseURLLabel)).toBeNull()
-      // The collapsed row still says a tuning field carries a user value.
-      expect(screen.getByRole('button', { name: new RegExp(en.advancedLabel) }).textContent).toContain(en.overridden)
-      expect(screen.queryByText(en.advancedHint)).toBeNull()
+      expect(screen.getByRole('tab', { name: en.settingsTabAdvanced }).hasAttribute('data-marked')).toBe(true)
 
       openAdvanced()
       expect(screen.getByLabelText(en.baseURLLabel)).toHaveProperty('value', 'https://opencode.ai/zen/go/v1')
       expect(screen.getByLabelText(en.refreshMinutesLabel)).toHaveProperty('value', '30')
-      expect(screen.getByRole('button', { name: new RegExp(en.accountsTitle) })).toBeTruthy()
     })
 
-    it('keeps the advanced header to its title, with no summary line', () => {
+    it('names each tab only in the tab strip, not again inside the panel', () => {
       renderSection(stateOf())
-      const trigger = screen.getByText(en.advancedLabel).closest('button') as HTMLButtonElement
-      // The row is the title and the disclosure chevron; the tuning summary that used
-      // to sit between them said what the card already says once it is open.
-      expect(trigger.textContent).toBe(en.advancedLabel)
-      expect(trigger.querySelectorAll('span')).toHaveLength(1)
+      // Appearance and advanced keep their reset actions, but the headings that
+      // repeated the tab label above them are gone.
+      openAdvanced()
+      expect(screen.queryByRole('heading', { level: 3, name: en.advancedLabel })).toBeNull()
+      expect(screen.getByRole('button', { name: en.advancedResetAll })).toBeTruthy()
+
+      selectTab('appearance')
+      expect(screen.queryByRole('heading', { level: 3, name: en.usageAppearanceLabel })).toBeNull()
+      expect(screen.getByRole('button', { name: en.usageAppearanceReset })).toBeTruthy()
     })
 
-    it('ties the advanced disclosure to the region it controls', () => {
+    it('wires each tab to the panel it controls', () => {
       renderSection(stateOf())
-      const trigger = screen.getByText(en.advancedLabel).closest('button') as HTMLButtonElement
-      expect(trigger.getAttribute('aria-expanded')).toBe('false')
-      expect(trigger.getAttribute('aria-controls')).toBe('opencode-go-advanced')
+      const advancedTab = screen.getByRole('tab', { name: en.settingsTabAdvanced })
+      expect(advancedTab.getAttribute('aria-selected')).toBe('false')
+      expect(advancedTab.getAttribute('aria-controls')).toBe('opencode-go-panel-advanced')
+      expect(document.getElementById('opencode-go-panel-advanced')).toBeNull()
 
-      fireEvent.click(trigger)
-      expect(trigger.getAttribute('aria-expanded')).toBe('true')
-      expect(document.getElementById('opencode-go-advanced')).not.toBeNull()
+      fireEvent.click(advancedTab)
+      expect(screen.getByRole('tab', { name: en.settingsTabAdvanced }).getAttribute('aria-selected')).toBe('true')
+      expect(document.getElementById('opencode-go-panel-advanced')).not.toBeNull()
     })
 
-    it('reads down the page as connection, models, then tuning', () => {
+    it('orders the tabs as overview, models, appearance and advanced', () => {
       renderSection(stateOf({ models: listing([{ id: 'm', name: 'Model' }]) }))
       expect(screen.getByRole('heading', { level: 2 }).textContent).toBe(en.titleLabel)
-      // Account management sits between the provider switch and model settings.
-      const sequence = [
-        screen.getByRole('switch', { name: en.enabledLabel }),
-        screen.getByRole('button', { name: new RegExp(en.accountsTitle) }),
-        screen.getByRole('navigation', { name: en.modelsLabel }),
-        screen.getByText(en.advancedLabel),
-      ]
-      for (let index = 1; index < sequence.length; index += 1) {
-        const relation = sequence[index - 1].compareDocumentPosition(sequence[index])
-        expect(relation & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-      }
-      // The tuning card is the last thing on the page, under the list it tunes.
-      const tuning = screen.getByText(en.advancedLabel).closest('section') as HTMLElement
-      expect(tuning.parentElement?.lastElementChild).toBe(tuning)
+      const labels = within(screen.getByRole('tablist', { name: en.settingsTabsLabel }))
+        .getAllByRole('tab').map(tab => tab.textContent)
+      expect(labels).toEqual([en.settingsTabOverview, en.settingsTabModels, en.settingsTabAppearance, en.settingsTabAdvanced])
+
+      // The overview keeps the provider switch and account management together.
+      selectTab('overview')
+      const enabledSwitch = screen.getByRole('switch', { name: en.enabledLabel })
+      const accountsButton = screen.getByRole('button', { name: new RegExp(en.accountsTitle) })
+      expect(enabledSwitch.compareDocumentPosition(accountsButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     })
 
     it('stages edits through the injected actions and resets on demand', () => {
@@ -676,15 +825,46 @@ describe("settings page and typed capacity editing", () => {
       expect(screen.getByText(en.invalidValue)).toBeTruthy()
     })
 
-    it('returns only the customized rows from the card reset', () => {
+    it('mirrors the Host schema bounds on every numeric input', () => {
+      renderSection(stateOf())
+      openAdvanced()
+      const fields: readonly (readonly [label: string, name: TextField])[] = [
+        [en.refreshMinutesLabel, 'refreshMinutes'],
+        [en.streamIdleTimeoutMsLabel, 'streamIdleTimeoutMs'],
+        [en.requestPreparationTimeoutMsLabel, 'requestPreparationTimeoutMs'],
+        [en.requestTimeoutMsLabel, 'requestTimeoutMs'],
+        [en.maxImagesLabel, 'maxImages'],
+        [en.maxRequestImageBytesLabel, 'maxRequestImageBytes'],
+        [en.requestImagePixelBudgetLabel, 'requestImagePixelBudget'],
+        [en.requestImageMaxBytesLabel, 'requestImageMaxBytes'],
+      ]
+      for (const [label, name] of fields) {
+        const limit = NUMERIC_FIELD_LIMITS[name]!
+        expect(limit).toBeDefined()
+        const input = screen.getByLabelText(label) as HTMLInputElement
+        expect(input.type).toBe('number')
+        expect(input.step).toBe(limit.integer ? '1' : 'any')
+        expect(input.min).toBe(String(limit.min))
+        expect(input.max).toBe(limit.max === undefined ? '' : String(limit.max))
+      }
+    })
+
+    it('returns only the customized rows from each reset', () => {
       const edits = actions()
       renderSection(stateOf({
         usageDisplay: field('always', { overridden: true }),
         baseURL: field('https://other.test/v1', { overridden: true }),
+        showSidebarQuota: field('true', { overridden: true }),
+        usagePillStyle: field('plain', { overridden: true }),
       }), edits)
       openAdvanced()
       fireEvent.click(screen.getByRole('button', { name: en.advancedResetAll }))
-      expect(edits.resetField.mock.calls.map(call => call[0]).sort()).toEqual(['baseURL', 'usageDisplay'])
+      expect(edits.resetField.mock.calls.map(call => call[0]).sort()).toEqual(['baseURL'])
+
+      selectTab('appearance')
+      fireEvent.click(screen.getByRole('button', { name: en.usageAppearanceReset }))
+      expect(edits.resetField.mock.calls.map(call => call[0]).sort())
+        .toEqual(['baseURL', 'showSidebarQuota', 'usageDisplay', 'usagePillStyle'])
     })
 
     it('keeps the card reset out of reach while every row inherits its value', () => {
@@ -694,7 +874,7 @@ describe("settings page and typed capacity editing", () => {
     })
 
     it('carries the provider hint as the switch description, behind its mark', () => {
-      renderSection(stateOf())
+      renderSection(stateOf(), {}, { foldedModels: true })
       // The Switch primitive forwards no aria-describedby, so the sentence rides the
       // one channel it does forward while the mark opens it in the Host's bubble.
       expect(screen.getByRole('switch', { name: en.enabledLabel }).getAttribute('title')).toBe(en.enabledHint)
@@ -769,6 +949,33 @@ describe("settings page and typed capacity editing", () => {
         expect(host.form.getSnapshot().value?.modelLimits).toEqual({ budget: { contextWindow: 100000, thinkingBudgets: null } })
         fireEvent.click(screen.getByRole('button', { name: 'Effort Model' }))
         expect(screen.queryByText(en.thinkingBudgets)).toBeNull()
+      } finally { controller.dispose() }
+    })
+
+    it('caps a thinking budget by the Host schema ceiling', async () => {
+      const host = createConfigForm<OpencodeGoSettings>()
+      acceptFormWrites(host)
+      const controller = new OpencodeGoSectionController(host.form, { remote: {
+        credentials: { describe: async () => ({ ok: true, value: {} }) },
+      } } as never, async () => ({ ok: true, value: { stale: false, models: [
+        { id: 'big', name: 'Big Budget', maxTokens: 4_000_000, reasoningBudget: { min: 1024, max: 2_000_000 } },
+      ] } }))
+      host.publish({ status: 'ready', writable: true, value: {}, user: {} })
+      render(<OpencodeGoSection {...controller.inject()} t={t}
+        useOpencodeGo={bindSnapshotSelector(controller.inject().hooks.opencodeGo)} />)
+      try {
+        await act(async () => { await Promise.resolve() })
+        openModelLimits()
+        fireEvent.click(screen.getByText(en.thinkingBudgets))
+        const input = screen.getByLabelText<HTMLInputElement>(t('thinkingBudgetAddLabel', { name: 'Big Budget' }))
+        const add = () => screen.getByRole<HTMLButtonElement>('button', { name: en.thinkingBudgetAdd })
+        expect(input.max).toBe(String(MAX_THINKING_BUDGET_TOKENS))
+        fireEvent.change(input, { target: { value: String(MAX_THINKING_BUDGET_TOKENS + 1) } })
+        expect(input.getAttribute('aria-invalid')).toBe('true')
+        expect(add().disabled).toBe(true)
+        fireEvent.change(input, { target: { value: String(MAX_THINKING_BUDGET_TOKENS) } })
+        expect(input.getAttribute('aria-invalid')).toBe('false')
+        expect(add().disabled).toBe(false)
       } finally { controller.dispose() }
     })
 
@@ -961,37 +1168,10 @@ describe("settings page and typed capacity editing", () => {
     })
   })
 
-  it('opens the shared analytics dialog from the settings card', async () => {
-    const readAnalytics = vi.fn().mockResolvedValue({
-      generatedAt: Date.UTC(2026, 9, 18), range: { from: Date.UTC(2026, 8, 18), to: Date.UTC(2026, 9, 18) }, timeZone: 'UTC',
-      totals: { requests: 1, unsettledAttempts: 0, summaries: 0, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0,
-        cacheWriteTokens: 0, estimatedMicroUsd: 100, pricedRequests: 1, unpricedRequests: 0, missingUsage: 0 },
-      byModel: [], byDay: [],
-      coverage: { listedSessions: 1, scannedSessions: 1, matchedSessions: 1, failedSessions: 0, eventsScanned: 2,
-        summaries: 0, legacyRequests: 0, missingUsage: 0, truncated: false, scanMs: 3 },
-      pricing: { source: 'OpenCode /models', unpricedModels: [] },
-    })
-    setGoTheme('graphite')
-    renderSection(stateOf(), {}, { analytics: { readAnalytics } })
-    const row = screen.getByRole('button', { name: new RegExp(en.analyticsCardTitle) })
-    expect(row.getAttribute('aria-expanded')).toBe('false')
-    // Folded, the row still names the style in force.
-    expect(row.textContent).toContain(en.themeGraphite)
-    expect(screen.queryByRole('group', { name: en.themeLabel })).toBeNull()
-    await act(async () => { fireEvent.click(row) })
-    expect(row.getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByText(en.analyticsBoardLabel)).toBeTruthy()
-    expect(screen.getByText(en.themeHint)).toBeTruthy()
-    const picker = screen.getByRole('group', { name: en.themeLabel })
-    expect(within(picker).getAllByRole('button')).toHaveLength(4)
-    // The style picker is the only entry: choosing one updates the store and the row.
-    await act(async () => { fireEvent.click(within(picker).getByRole('button', { name: en.themeSeaSalt })) })
-    expect(getGoTheme()).toBe('sea-salt')
-    expect(row.textContent).toContain(en.themeSeaSalt)
-    // The first row of the unfolded card opens the dashboard.
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.analyticsOpenBoard })) })
-    expect(screen.getByRole('dialog', { name: en.analyticsTitle })).toBeTruthy()
-    expect(readAnalytics).toHaveBeenCalled()
+  it('keeps the usage history dashboard out of the settings page', () => {
+    renderSection(stateOf())
+    expect(screen.queryByRole('heading', { name: en.analyticsTitle })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Open dashboard|打开看板/ })).toBeNull()
   })
 })
 
@@ -1009,7 +1189,7 @@ describe("advanced settings reset", () => {
     render(<OpencodeGoSection {...controller.inject()} t={key => en[key]}
       useOpencodeGo={bindSnapshotSelector(controller.inject().hooks.opencodeGo)} />)
     await act(async () => { await Promise.resolve() })
-    fireEvent.click(screen.getByText(en.advancedLabel))
+    fireEvent.click(document.getElementById('opencode-go-tab-advanced') as HTMLElement)
     return { host, controller }
   }
 
@@ -1125,7 +1305,7 @@ describe("installed Host localization", () => {
 
   async function mountSurfaces(locale: HostLocaleRuntime) {
     const settings = createConfigForm<OpencodeGoSettings>()
-    settings.publish({ status: 'ready', writable: true, value: {}, base: {}, user: {} })
+    settings.publish({ status: 'ready', writable: true, value: defaultClientSettings, base: {}, user: {} })
     const readModels = vi.fn(async () => ({ ok: true as const, value: { stale: false, models: [
       { id: 'alpha', name: 'Alpha', releaseDate: '2026-09-23', contextWindow: 123456, maxTokens: 8192 },
       { id: 'missing', name: 'missing', configurationMissing: true },
@@ -1158,14 +1338,16 @@ describe("installed Host localization", () => {
       </>
     }
     await act(async () => { render(<Surfaces />) })
-    // The model card ships folded; the copy checks read the list inside it.
-    await act(async () => { fireEvent.click(document.querySelector('[aria-controls="opencode-go-models"]') as HTMLElement) })
+    // The copy checks read the model tab; select it the way a reader would.
+    await act(async () => { fireEvent.click(document.getElementById('opencode-go-tab-models') as HTMLElement) })
     return { snapshot: face.hooks.opencodeGo.getSnapshot, readModels, readUsage }
   }
 
   function expectCopy(active: 'zh' | 'en'): void {
     const copy = active === 'zh' ? zh : en
-    expect(screen.getByText(copy.intro)).toBeTruthy()
+    // The title is the only prose above the tab strip: the intro line was dropped
+    // so the tabs sit closer to the top of the page.
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe(copy.titleLabel)
     expect(screen.getAllByText(copy.newBadge).length).toBeGreaterThan(0)
     expect(screen.getByText(copy.configurationMissing)).toBeTruthy()
     expect(screen.getByRole('button', { name: copy.modelsRefresh })).toBeTruthy()
@@ -1192,7 +1374,10 @@ describe("installed Host localization", () => {
     fireEvent.click(screen.getByRole('button', { name: `${copy.usageTitle}: ${copy.usageRollingShort} 0% · ${copy.usageWeekShort} 10%` }))
     expect(screen.getByRole('dialog', { name: copy.usageTitle })).toBeTruthy()
     expect(screen.getByRole('progressbar', { name: copy.usage_monthly })).toBeTruthy()
-    expect(screen.getAllByText(`${copy.usageResets} ${new Date(windowUsage.resetsAt).toLocaleString(active)}`)).toHaveLength(3)
+    // Panel timestamps stop at minutes: seconds only add noise at this size.
+    expect(screen.getAllByText(`${copy.usageResets} ${new Date(windowUsage.resetsAt).toLocaleString(active, {
+      year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    })}`)).toHaveLength(3)
   })
 
   it('honors an explicit Host English preference over a Chinese browser', async () => {
@@ -1207,7 +1392,7 @@ describe("installed Host localization", () => {
     const { locale, host } = createLocale(['zh-CN'])
     const { snapshot, readModels, readUsage } = await mountSurfaces(locale)
     const t = locale.bind(namespace)
-    fireEvent.click(screen.getByText(zh.advancedLabel))
+    fireEvent.click(document.getElementById('opencode-go-tab-advanced') as HTMLElement)
     const refreshInput = screen.getByLabelText(zh.refreshMinutesLabel)
     fireEvent.change(refreshInput, { target: { value: '30' } })
     fireEvent.click(screen.getByRole('button', { name: `${zh.usageTitle}: ${zh.usageRollingShort} 0% · ${zh.usageWeekShort} 10%` }))
@@ -1216,12 +1401,17 @@ describe("installed Host localization", () => {
     await act(async () => { locale.setLocale('en') })
 
     expect(locale.bind(namespace)).toBe(t)
-    expectCopy('en')
+    // The advanced tab keeps its staged draft across the locale change.
     expect(screen.getByLabelText(en.refreshMinutesLabel)).toBe(refreshInput)
     expect(refreshInput).toHaveProperty('value', '30')
     expect(snapshot().dirty).toBe(true)
+    // Translated model copy lives on the models tab; select it to read it.
+    await act(async () => { fireEvent.click(document.getElementById('opencode-go-tab-models') as HTMLElement) })
+    expectCopy('en')
     expect(screen.getByRole('dialog', { name: en.usageTitle })).toBeTruthy()
-    expect(screen.getAllByText(`${en.usageResets} ${new Date(windowUsage.resetsAt).toLocaleString('en')}`)).toHaveLength(3)
+    expect(screen.getAllByText(`${en.usageResets} ${new Date(windowUsage.resetsAt).toLocaleString('en', {
+      year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    })}`)).toHaveLength(3)
     expect(host.set).toHaveBeenCalledExactlyOnceWith('preference', 'en')
     expect(readModels).toHaveBeenCalledTimes(1)
     expect(readUsage).toHaveBeenCalledTimes(1)
@@ -1231,7 +1421,7 @@ describe("installed Host localization", () => {
 describe('typed ConfigForm drafts and writes', () => {
   const controllers: OpencodeGoSectionController[] = []
   afterEach(() => { for (const controller of controllers.splice(0)) controller.dispose() })
-  function setup(value: OpencodeGoSettings = {}) {
+  function setup(value: OpencodeGoSettings = defaultClientSettings) {
     const host = createConfigForm(value)
     const controller = new OpencodeGoSectionController(host.form, {} as never)
     controllers.push(controller)
@@ -1239,9 +1429,89 @@ describe('typed ConfigForm drafts and writes', () => {
     return { host, controller, actions, snapshot: actions.hooks.opencodeGo.getSnapshot }
   }
 
+  it('defaults, validates and persists sidebar visibility and pill style as typed values', async () => {
+    const { host, controller, actions, snapshot } = setup()
+    expect(editableKeys).toEqual(expect.arrayContaining(['showSidebarQuota', 'usagePillStyle']))
+    expect(snapshot()).toMatchObject({ showSidebarQuota: { text: 'false' }, usagePillStyle: { text: 'badge' } })
+    actions.edit('showSidebarQuota', 'true')
+    actions.edit('usagePillStyle', 'plain')
+    await controller.save()
+    expect(host.mutate).toHaveBeenCalledWith([
+      { op: 'set', path: ['showSidebarQuota'], value: true },
+      { op: 'set', path: ['usagePillStyle'], value: 'plain' },
+    ], expect.any(Number))
+    expect(host.form.getSnapshot().user).toMatchObject({ showSidebarQuota: true, usagePillStyle: 'plain' })
+    expect(snapshot().dirty).toBe(false)
+    actions.edit('usagePillStyle', 'neon')
+    actions.edit('showSidebarQuota', '1')
+    expect(snapshot()).toMatchObject({ invalid: true, showSidebarQuota: { invalid: true }, usagePillStyle: { invalid: true } })
+    await controller.save()
+    expect(host.mutate).toHaveBeenCalledTimes(1)
+  })
+
+  it('stages and saves the visual theme without changing the applied theme early', async () => {
+    const { host, controller, actions, snapshot } = setup()
+    expect(snapshot()).toMatchObject({ appearanceTheme: { text: 'native' }, appliedAppearanceTheme: 'native' })
+    actions.edit('appearanceTheme', 'classic')
+    expect(snapshot()).toMatchObject({ appearanceTheme: { text: 'classic' }, appliedAppearanceTheme: 'native', dirty: true })
+    await controller.save()
+    expect(host.mutate).toHaveBeenCalledExactlyOnceWith([{ op: 'set', path: ['appearanceTheme'], value: 'classic' }], expect.any(Number))
+    expect(snapshot()).toMatchObject({ appearanceTheme: { text: 'classic' }, appliedAppearanceTheme: 'classic', dirty: false })
+    actions.edit('appearanceTheme', 'system')
+    expect(snapshot()).toMatchObject({ appearanceTheme: { invalid: true }, appliedAppearanceTheme: 'classic', invalid: true })
+    await controller.save()
+    expect(host.mutate).toHaveBeenCalledTimes(1)
+  })
+
+  it('defaults, persists and resets the Free channel opt-in as an independent typed value', async () => {
+    const { host, controller, actions, snapshot } = setup()
+    expect(editableKeys).toEqual(expect.arrayContaining(['freeEnabled']))
+    expect(snapshot()).toMatchObject({ freeEnabled: { text: 'false', overridden: false, invalid: false } })
+    actions.edit('freeEnabled', 'true')
+    await controller.save()
+    expect(host.mutate).toHaveBeenCalledExactlyOnceWith([{ op: 'set', path: ['freeEnabled'], value: true }], 0)
+    expect(host.form.getSnapshot().user).toMatchObject({ freeEnabled: true })
+    expect(snapshot()).toMatchObject({ freeEnabled: { text: 'true' }, dirty: false, usageDisplay: { text: 'auto' } })
+    actions.edit('freeEnabled', 'false')
+    await controller.save()
+    expect(host.form.getSnapshot().user).toMatchObject({ freeEnabled: false })
+    actions.resetField('freeEnabled')
+    expect(snapshot().freeEnabled).toMatchObject({ text: 'false', overridden: false })
+  })
+
+  it('keeps the Free channel draft and reports a refused opt-in without touching other fields', async () => {
+    const { host, controller, actions, snapshot } = setup()
+    host.mutate.mockResolvedValueOnce(false)
+    actions.edit('refreshMinutes', '30')
+    actions.edit('freeEnabled', 'true')
+    await controller.save()
+    expect(snapshot()).toMatchObject({ failed: true, dirty: true, saving: false,
+      freeEnabled: { text: 'true' }, refreshMinutes: { text: '30' } })
+    expect(host.form.getSnapshot().user).toEqual({})
+    await controller.save()
+    expect(host.mutate).toHaveBeenLastCalledWith([
+      { op: 'set', path: ['refreshMinutes'], value: 30 },
+      { op: 'set', path: ['freeEnabled'], value: true },
+    ], 0)
+    expect(snapshot()).toMatchObject({ failed: false, dirty: false })
+  })
+
+  it('resets appearance to inherited values without changing the selected account', async () => {
+    const value = { apiKeyEnv: 'ACCOUNT_A', showSidebarQuota: false, usagePillStyle: 'badge' as const }
+    const { host, controller, actions, snapshot } = setup(value)
+    host.publish({ base: { showSidebarQuota: true, usagePillStyle: 'plain' }, user: value })
+    actions.resetField('showSidebarQuota')
+    actions.resetField('usagePillStyle')
+    await controller.save()
+    expect(snapshot()).toMatchObject({ showSidebarQuota: { text: 'true' }, usagePillStyle: { text: 'plain' } })
+    expect(host.form.getSnapshot().value?.apiKeyEnv).toBe('ACCOUNT_A')
+    expect(host.form.getSnapshot().user).toEqual({ apiKeyEnv: 'ACCOUNT_A' })
+  })
+
   it.each(['baseURL', 'freeBaseURL'] as const)('validates %s drafts before saving', async field => {
     const { host, controller, actions, snapshot } = setup()
-    for (const value of ['invalid', 'ftp://gateway.example', 'https://gateway.example/v1?key=x', 'https://gateway.example/v1#fragment']) {
+    for (const value of ['invalid', 'ftp://gateway.example', 'https://gateway.example/v1?key=x', 'https://gateway.example/v1#fragment',
+      'https://gateway-user:gateway-super-secret@gateway.example/v1']) {
       actions.edit(field, value)
       expect(snapshot()[field].invalid).toBe(true)
       await controller.save()
@@ -1308,6 +1578,73 @@ describe('typed ConfigForm drafts and writes', () => {
     expect(snapshot()).toMatchObject({ dirty: false, invalid: false })
   })
 
+  const invalidNumericDrafts: ReadonlyArray<readonly [TextField, string]> = [
+    ['refreshMinutes', '0'], ['refreshMinutes', '-1'], ['refreshMinutes', '1.5'], ['refreshMinutes', '10081'], ['refreshMinutes', 'abc'],
+    ['streamIdleTimeoutMs', '0'], ['streamIdleTimeoutMs', '-1'], ['streamIdleTimeoutMs', '2147483648'], ['streamIdleTimeoutMs', 'Infinity'],
+    ['requestPreparationTimeoutMs', '0'], ['requestPreparationTimeoutMs', '-1'], ['requestPreparationTimeoutMs', '1.5'],
+    ['requestPreparationTimeoutMs', '2147483648'],
+    ['requestTimeoutMs', '0'], ['requestTimeoutMs', '-1'], ['requestTimeoutMs', '1.5'], ['requestTimeoutMs', '2147483648'],
+    ['maxImages', '0'], ['maxImages', '-1'], ['maxImages', '1.5'], ['maxImages', '9007199254740992'],
+    ['maxRequestImageBytes', '0'], ['maxRequestImageBytes', '1.5'],
+    ['requestImagePixelBudget', '0'], ['requestImagePixelBudget', '1.5'],
+    ['requestImageMaxBytes', '0'], ['requestImageMaxBytes', '1.5'],
+  ]
+
+  it.each(invalidNumericDrafts)('marks %s=%s invalid and blocks Save', async (field, text) => {
+    const { host, controller, actions, snapshot } = setup()
+    actions.edit(field, text)
+    expect(snapshot()[field]).toMatchObject({ invalid: true })
+    expect(snapshot()).toMatchObject({ dirty: true, invalid: true })
+    await controller.save()
+    expect(host.mutate).not.toHaveBeenCalled()
+    actions.discard()
+    expect(snapshot()[field].invalid).toBe(false)
+  })
+
+  const validNumericDrafts: ReadonlyArray<readonly [TextField, string, number]> = [
+    ['refreshMinutes', '1', 1], ['refreshMinutes', '10080', 10080],
+    ['streamIdleTimeoutMs', '0.5', 0.5], ['streamIdleTimeoutMs', '2147483647', 2147483647],
+    ['requestPreparationTimeoutMs', '1', 1], ['requestTimeoutMs', '2147483647', 2147483647],
+    ['maxImages', '1', 1], ['maxImages', '9007199254740991', Number.MAX_SAFE_INTEGER],
+    ['maxRequestImageBytes', '1', 1], ['requestImagePixelBudget', '1', 1], ['requestImageMaxBytes', '1', 1],
+  ]
+
+  it.each(validNumericDrafts)('accepts the in-range draft %s=%s', async (field, text, expected) => {
+    const { host, controller, actions, snapshot } = setup()
+    actions.edit(field, text)
+    expect(snapshot()[field].invalid).toBe(false)
+    await controller.save()
+    expect(host.form.getSnapshot().value?.[field]).toBe(expected)
+  })
+
+  it('projects the Host namespace status through loading, ready and unavailable', () => {
+    const host = createConfigForm<OpencodeGoSettings>()
+    const controller = new OpencodeGoSectionController(host.form, {} as never)
+    controllers.push(controller)
+    const snapshot = controller.inject().hooks.opencodeGo.getSnapshot
+    expect(snapshot()).toMatchObject({ status: 'loading' })
+    host.publish({ status: 'ready', writable: true, value: {} })
+    expect(snapshot()).toMatchObject({ status: 'ready' })
+    host.publish({ status: 'unavailable' })
+    expect(snapshot()).toMatchObject({ status: 'unavailable' })
+  })
+
+  it('reports a refused provider switch separately from a refused model visibility', async () => {
+    const host = createConfigForm(defaultClientSettings)
+    const controller = new OpencodeGoSectionController(host.form, {} as never,
+      async () => ({ ok: true, value: { stale: false, models: [] } }))
+    controllers.push(controller)
+    const face = controller.inject()
+    host.set.mockResolvedValueOnce(false)
+    render(<OpencodeGoSection {...face} t={translator('en')} useOpencodeGo={bindSnapshotSelector(face.hooks.opencodeGo)} />)
+    const provider = screen.getByRole<HTMLButtonElement>('switch', { name: en.enabledLabel })
+    await act(async () => { fireEvent.click(provider) })
+    expect(host.set).toHaveBeenCalledExactlyOnceWith('enabled', false)
+    expect(face.hooks.opencodeGo.getSnapshot()).toMatchObject({ enabledFailed: true, pickerFailed: false })
+    expect(screen.getByRole('alert').textContent).toBe(en.enabledFailed)
+    expect(screen.queryByText(en.pickerFailed)).toBeNull()
+  })
+
   it('previews inherited resets, and treats structurally equal capacity maps as clean', async () => {
     const { host, controller, actions, snapshot } = setup({ refreshMinutes: 15, modelLimits: { m: { maxTokens: 8192 } } })
     host.publish({ base: { refreshMinutes: 60 }, user: { refreshMinutes: 15 } })
@@ -1362,11 +1699,14 @@ describe('client registration and remote lifecycle', () => {
     const slotsRegister = vi.fn(() => () => {})
     const slotsInject = vi.fn((_slot: string, install: () => void) => install())
     const localeRegister = vi.fn(() => () => {})
-    const analyticsRead = vi.fn()
+    const analyticsRead = vi.fn(async (query: AnalyticsQuery, _signal?: AbortSignal) => ({ ok: true, value: createAnalyticsReport(query) }))
+    const analyticsExport = vi.fn(async (_query: AnalyticsQuery, _signal?: AbortSignal) => ({ ok: true, value: { filename: 'usage.csv', csv: 'date,requests\n2026-11-05,12\n' } }))
     const configForms = { get: vi.fn(() => settings.form) }
+    const serviceRequests: string[][] = []
     const ctx = {
       configForms,
       inject: (services: string[], install: (ready: unknown) => void) => {
+        serviceRequests.push([...services])
         if (services.every(path => path.split('.').reduce<unknown>((value, key) =>
           value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined, ctx))) install(ctx)
       },
@@ -1377,15 +1717,34 @@ describe('client registration and remote lifecycle', () => {
         $on: vi.fn((_event: string, listener: (ref: string) => void) => { listeners.add(listener); return () => listeners.delete(listener) }),
         opencodeGoModels: { read: vi.fn(async () => ({ ok: true, value: { models: [], stale: false } })) },
         opencodeGoAccounts: { execute: vi.fn(async () => ({ ok: true, value: 'applied' })) },
-        opencodeGoAnalytics: { read: analyticsRead },
+        opencodeGoAnalytics: { read: analyticsRead, exportCsv: analyticsExport },
         credentials: { describe: vi.fn(async () => ({ ok: true, value: {} })) },
         llm: { discoverModels: vi.fn(async () => ({ ok: true, value: [] })) },
       },
       slots: { inject: slotsInject, register: slotsRegister },
     }
-    return { ctx, settings, slotsRegister, slotsInject, localeRegister, configForms, analyticsRead, listeners,
+    return { ctx, settings, slotsRegister, slotsInject, localeRegister, configForms, analyticsRead, analyticsExport, listeners, serviceRequests,
       dispose: async () => { for (const effect of effects.splice(0).reverse()) { const dispose = await effect; if (typeof dispose === 'function') dispose() } },
     }
+  }
+
+  function conversationHarness() {
+    const harness = clientHarness()
+    harness.settings.publish({ status: 'ready', writable: true, value: { usageDisplay: 'always', apiKeyEnv: 'ACCOUNT_A', accounts: [
+      { id: 'primary', name: 'Primary', apiKeyEnv: 'ACCOUNT_A' },
+    ] } })
+    const directory = createSnapshotStore<ModelDirectoryState>({ current: { provider: 'dsh-opencode-go', model: 'alpha' }, routable: true,
+      groups: [], failures: [], status: 'ready', error: null })
+    const window = { status: 'ok', percent: 10, resetsAt: '2026-12-01T00:00:00Z' }
+    const read = vi.fn(async () => ({ ok: true, value: { rolling: window, weekly: window, monthly: window } }))
+    // Only the model directory is read from this scope: the slot itself supplies the
+    // session id, so the session and session-remote services are not dependencies.
+    Object.assign(harness.ctx, { modelDirectories: { directoryFor: () => ({ store: directory }) } })
+    Object.assign(harness.ctx.remote, { opencodeGoUsage: { read, readAccount: read } })
+    apply(harness.ctx as never)
+    const entries = harness.slotsRegister.mock.calls as unknown as Array<[{ id: string; inject: (session: string) => UsagePillProps }]>
+    const props = entries.find(([entry]) => entry.id === 'opencode-go-usage')![0].inject('session-a')
+    return { ...harness, props }
   }
 
   it('mounts the current ConfigForm and dictionaries, registers the page and releases its subscriptions', async () => {
@@ -1408,22 +1767,58 @@ describe('client registration and remote lifecycle', () => {
     expect(harness.settings.listenerCount()).toBe(0)
   })
 
-  it('cancels superseded and closed analytics queries through the registered settings page', async () => {
-    const harness = clientHarness()
+  it('declares only the client services the browser half actually uses', async () => {
+    const harness = conversationHarness()
+    try {
+      // Top-level fiber inject: every name here stops apply() until the host provides
+      // it, so it must stay at the services apply() itself reads.
+      expect(clientInject).toEqual(['slots', 'locale', 'remote', 'remote.credentials'])
+      const nested = [...new Set(harness.serviceRequests.map(services => [...services].sort().join(',')))].sort()
+      expect(nested).toEqual([
+        'configForms,remote.opencodeGoModels',
+        'modelDirectories',
+        'remote.opencodeGoAccounts',
+        'remote.opencodeGoAnalytics',
+        'remote.opencodeGoUsage',
+      ].sort())
+      // Anti-drift guard: a declared service that is never read anywhere else only
+      // gates the whole surface on a dependency nobody needs.
+      const declared = new Set<string>([...clientInject, ...harness.serviceRequests.flat()])
+      const sources = ['index.ts', 'controller.ts', 'Section.tsx', 'UsagePill.tsx', 'AnalyticsDialog.tsx', 'presentation.ts']
+        .map(name => readFileSync(resolve('src/client', name), 'utf8'))
+        .map(text => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, ''))
+        .join('\n')
+      for (const service of declared) {
+        expect(sources.split(service).length - 1, `${service} must be read, not only injected`).toBeGreaterThanOrEqual(2)
+      }
+    } finally { await harness.dispose() }
+  })
+
+  it('forwards account-scoped history and CSV queries with cancellation through the conversation pill', async () => {
+    const harness = conversationHarness()
+    const face = harness.props
+    const query: AnalyticsQuery = { accountRef: 'ACCOUNT_A', range: '7d' }
+    const controller = new AbortController()
+    try {
+      await expect(face.readAnalytics!(query, controller.signal)).resolves.toMatchObject({ accountRef: 'ACCOUNT_A', period: '7d' })
+      await expect(face.exportAnalytics!(query, controller.signal)).resolves.toMatchObject({ filename: 'usage.csv' })
+      expect(harness.analyticsRead).toHaveBeenCalledExactlyOnceWith(query, controller.signal)
+      expect(harness.analyticsExport).toHaveBeenCalledExactlyOnceWith(query, controller.signal)
+    } finally { await harness.dispose() }
+  })
+
+  it('opens history from the conversation pill and cancels superseded or closed queries', async () => {
+    const harness = conversationHarness()
     const signals: (AbortSignal | undefined)[] = []
     harness.analyticsRead.mockImplementation((_query: AnalyticsQuery, signal?: AbortSignal) => {
       signals.push(signal)
       return new Promise(resolve => signal?.addEventListener('abort', () => resolve({ ok: false,
         error: Object.assign(new Error('cancelled'), { code: 'gateway/cancelled' }) }), { once: true }))
     })
-    apply(harness.ctx as never)
-    const registration = harness.slotsRegister.mock.calls[0]?.[0] as unknown as { inject: () => OpencodeGoSectionFace }
-    const injected = registration.inject()
-    const view = render(<OpencodeGoSection {...injected} t={key => en[key]}
-      useOpencodeGo={bindSnapshotSelector(injected.hooks.opencodeGo)} />)
+    const view = render(<UsagePill {...harness.props} />)
     try {
-      fireEvent.click(screen.getByRole('button', { name: new RegExp(en.analyticsCardTitle) }))
-      await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.analyticsOpenBoard })) })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: new RegExp(en.usageTitle) })) })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.analyticsOpen })) })
       expect(signals).toHaveLength(1)
       expect(signals[0]?.aborted).toBe(false)
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.analyticsRange7d })) })
@@ -1477,6 +1872,43 @@ describe('client registration and remote lifecycle', () => {
     expect(harness.ctx.remote.opencodeGoAccounts.execute).toHaveBeenCalledExactlyOnceWith({ kind: 'select', ref: 'ACCOUNT_A' })
     harness.settings.publish({ writable: false })
     await expect(face.selectAccount!('ACCOUNT_A')).resolves.toBe(false)
+    await harness.dispose()
+    expect(harness.listeners.size).toBe(0)
+  })
+
+  it('registers sidebar quota at the root without requiring a conversation or model directory', async () => {
+    const harness = clientHarness()
+    harness.settings.publish({ value: { showSidebarQuota: true, usageDisplay: 'off', apiKeyEnv: 'ACCOUNT_A', accounts: [
+      { id: 'a', name: 'Primary', apiKeyEnv: 'ACCOUNT_A' }, { id: 'b', name: 'Backup', apiKeyEnv: 'ACCOUNT_B' },
+    ] } })
+    const original = harness.settings.form.getSnapshot()
+    const window = { status: 'ok', percent: 12, resetsAt: '2026-12-01T00:00:00Z' }
+    const read = vi.fn(async () => ({ ok: true, value: { rolling: window, weekly: window, monthly: window } }))
+    const readAccount = vi.fn(async (_ref: string) => ({ ok: true, value: { rolling: window, weekly: window, monthly: window } }))
+    Object.assign(harness.ctx.remote, { opencodeGoUsage: { read, readAccount } })
+    apply(harness.ctx as never)
+    expect(harness.slotsInject).toHaveBeenCalledWith('sidebar.footer.action', expect.any(Function))
+    expect(harness.slotsInject).not.toHaveBeenCalledWith('conversation.input.right', expect.any(Function))
+    const registrations = harness.slotsRegister.mock.calls as unknown as Array<[
+      { id: string; name: string; inject: () => Omit<SidebarQuotaProps, 'wide'> }, unknown,
+    ]>
+    const [registration, component] = registrations.find(([entry]) => entry.id === 'opencode-go-sidebar-quota')!
+    expect(registration.name).toBe('sidebar.footer.action')
+    expect(component).toBe(SidebarQuota)
+    const props = registration.inject()
+    let view!: ReturnType<typeof render>
+    await act(async () => { view = render(<SidebarQuota {...props} wide />) })
+    expect(screen.getByText('OpenCode Go')).toBeTruthy()
+    expect(readAccount).toHaveBeenCalledExactlyOnceWith('ACCOUNT_A')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: `${en.sidebarNextAccount}: Primary` })) })
+    expect(readAccount).toHaveBeenLastCalledWith('ACCOUNT_B')
+    expect(screen.getByRole('button', { name: `${en.sidebarNextAccount}: Backup` })).toBeTruthy()
+    expect(read).not.toHaveBeenCalled()
+    expect(harness.ctx.remote.opencodeGoAccounts.execute).not.toHaveBeenCalled()
+    expect(harness.settings.form.getSnapshot()).toBe(original)
+    expect(harness.settings.set).not.toHaveBeenCalled()
+    expect(harness.settings.mutate).not.toHaveBeenCalled()
+    view.unmount()
     await harness.dispose()
     expect(harness.listeners.size).toBe(0)
   })

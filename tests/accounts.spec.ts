@@ -13,6 +13,7 @@ import { createUserMessage, LlmError, type GenerateOptions, type StreamChunk } f
 import { Context } from '@deepseek-ai/cordis'
 import { Config, PlainConfig, type LiveConfig, type OpencodeGoConfig } from '../src/config.ts'
 import { OpencodeGoAdapter, OpencodeGoRequestExecutor } from '../src/adapter.ts'
+import { accountFallback, isGatewayKeyRejection } from '../src/accounts.ts'
 import { apply } from '../src/index.ts'
 import { mockGateway, listingBody, textEvents, closeMockGateways } from './support/gateway.ts'
 
@@ -28,6 +29,33 @@ describe("seamless account fallback", () => {
   const drain = async (stream: AsyncIterable<StreamChunk>) => { const chunks: StreamChunk[] = []; for await (const chunk of stream) chunks.push(chunk); return chunks }
 
   afterEach(closeMockGateways)
+
+  it('keeps model permission failures out of account fallback and key cooldown', () => {
+    const failure = { code: 'PERMISSION_DENIED' }
+    expect(accountFallback({ failure, emitted: false, totalTokens: 0, aborted: false, hasNext: true })).toBeUndefined()
+    expect(isGatewayKeyRejection(failure)).toBe(false)
+  })
+
+  it.each([
+    { status: 403, error: { type: 'RegionError', message: 'Unavailable in region' } },
+    { status: 403, error: { type: 'DataPolicyError', message: 'Privacy policy restriction' } },
+    { status: 403, error: { message: 'permission denied' } },
+    { status: 402, error: { message: 'Permission required' } },
+  ])('preserves model permissions and reuses the valid key on the next request: %j', async ({ status, error }) => {
+    const gateway = await mockGateway({ status: 200, body: listingBody([request().model]) })
+    gateway.pushCompletions({ status, body: JSON.stringify({ error }) })
+    gateway.pushCompletions({ events: textEvents })
+    const onAccountSettled = vi.fn()
+    const adapter = new OpencodeGoAdapter({ config: () => configOf(gateway.url, { accounts, apiKeyEnv: 'ACCOUNT_A', autoSwitch: true }),
+      resolveApiKey: async config => config.apiKeyEnv, onAccountSettled })
+    expect((await drain(adapter.stream(request()))).at(-1)).toMatchObject({ reason: { kind: 'error', failure: {
+      code: 'PERMISSION_DENIED', message: expect.stringContaining(error.message),
+    } } })
+    expect(gateway.bodies).toHaveLength(1)
+    expect(onAccountSettled).not.toHaveBeenCalled()
+    expect((await drain(adapter.stream(request()))).at(-1)).toMatchObject({ reason: { kind: 'stop' } })
+    expect(gateway.headers.filter(header => header.authorization).map(header => header.authorization)).toEqual(['Bearer ACCOUNT_A', 'Bearer ACCOUNT_A'])
+  })
 
   it('preserves legacy credential configuration and distinguishes explicitly removing every account', () => {
     expect(PlainConfig().accounts).not.toEqual([])
@@ -576,9 +604,27 @@ describe('serialized account commands and primary selection', () => {
     expect(host.value().apiKeyEnv).toBe(backup.apiKeyEnv)
   })
 
+  it('rejects a stale fallback settlement after an external A -> C -> A edit without a capture in between', async () => {
+    const host = accountHarness({ accounts: [primary, backup], apiKeyEnv: primary.apiKeyEnv, autoSwitch: true })
+    const generation = host.manager.capture()
+    const config = host.value()
+    const describe = vi.spyOn(host.settings, 'describe')
+    host.externalEdit({ accounts: [backup, primary], apiKeyEnv: backup.apiKeyEnv })
+    host.externalEdit({ accounts: [primary, backup], apiKeyEnv: primary.apiKeyEnv })
+    expect(host.value()).toEqual(config)
+    const notice = { fromRef: primary.apiKeyEnv, toRef: backup.apiKeyEnv, reason: 'quota' as const, at: Date.now() }
+    host.manager.settle({ seq: 1, generation, config, ref: backup.apiKeyEnv, notice })
+    await Promise.resolve()
+    expect(host.settings.mutate).not.toHaveBeenCalled()
+    expect(host.value().apiKeyEnv).toBe(primary.apiKeyEnv)
+    expect(host.manager.lastSwitch()).toBeUndefined()
+    // The fence must not serialize every settings namespace on hot paths.
+    expect(describe).not.toHaveBeenCalled()
+  })
+
   it.each([
     { status: 401, message: 'unauthorized' },
-    { status: 403, message: 'permission denied' },
+    { status: 403, message: 'invalid API key' },
     { status: 429, message: 'rate limit reached' },
     { status: 403, message: 'Monthly usage limit exceeded' },
   ])('promotes the backup after HTTP $status $message before output', async failure => {
@@ -605,7 +651,7 @@ describe('serialized account commands and primary selection', () => {
     const config = configOf(gateway.url, { accounts: [primary, backup], apiKeyEnv: primary.apiKeyEnv, autoSwitch: true })
     const adapter = new OpencodeGoAdapter({ config: () => config, resolveApiKey: async config => config.apiKeyEnv })
     try {
-      gateway.pushCompletions({ status, body: '{"error":{"message":"rejected"}}' })
+      gateway.pushCompletions({ status, body: JSON.stringify({ error: { message: status === 403 ? 'invalid API key' : 'rejected' } }) })
       gateway.pushCompletions({ events: textEvents }); await drain(adapter.stream(requestOf()))
       gateway.pushCompletions({ events: textEvents }); await drain(adapter.stream(requestOf()))
       expect(gateway.headers.filter(header => header.authorization).map(header => header.authorization)).toEqual(['Bearer PRIMARY_KEY', 'Bearer BACKUP_KEY', 'Bearer BACKUP_KEY'])
