@@ -579,8 +579,28 @@ export class OpencodeGoAdapter extends LlmAdapter {
   private readonly credentialVersions = new Map<string, number>()
   private credentialEpoch = 0
 
-  /** Balances consecutive requests across the saved accounts, one turn each. */
+  /** Advances once per new conversation so balanced sessions spend accounts in turn. */
   private accountCursor = 0
+
+  /**
+   * Pins a balanced conversation to one account. Consecutive turns then reuse
+   * that account's prompt cache instead of re-sending the whole transcript to a
+   * different account every turn.
+   */
+  private readonly sessionAccounts = new Map<string, string>()
+
+  /**
+   * Records the account a conversation is pinned to. The map is bounded so a
+   * long-lived host cannot grow it without limit; re-inserting moves a session
+   * to the recent end, so the oldest entry is the one evicted.
+   */
+  private rememberSessionAccount(sessionId: string, ref: string): void {
+    this.sessionAccounts.delete(sessionId)
+    this.sessionAccounts.set(sessionId, ref)
+    if (this.sessionAccounts.size <= 256) return
+    const oldest = this.sessionAccounts.keys().next()
+    if (!oldest.done) this.sessionAccounts.delete(oldest.value)
+  }
 
   /** Monotonic sequence of the latest request this adapter started. */
   private callSeq = 0
@@ -804,13 +824,24 @@ export class OpencodeGoAdapter extends LlmAdapter {
       const until = this.rejectedKeys.get(ref)?.get(gateway)
       return until === undefined || now >= until
     })
-    // A balanced dispatch starts on the next account in the rotation; without
-    // autoSwitch it still only tries that one. A rejected key stays out of the
-    // rotation until its window lapses.
-    const ordered = balanced ? rotateAccountRefs(usable.length > 0 ? usable : base, this.accountCursor++) : base
+    // A balanced dispatch keeps one conversation on one account: consecutive
+    // turns then reuse that account's prompt cache instead of re-paying for the
+    // transcript elsewhere. The cursor advances only for a session with no
+    // binding, so new conversations still spend the subscriptions in turn.
+    const sessionKey = balanced && options.sessionId !== undefined ? String(options.sessionId) : undefined
+    // Keys the gateway rejected lately stay out of the rotation until their
+    // window lapses. A bound account that is cooling down is skipped for this
+    // request only: the binding stays, so the session returns to it afterwards.
+    const pool = usable.length > 0 ? usable : base
+    const remembered = sessionKey === undefined ? undefined : this.sessionAccounts.get(sessionKey)
+    const bound = remembered !== undefined && refs.includes(remembered) && usable.includes(remembered) ? remembered : undefined
+    const ordered = bound !== undefined ? [bound, ...pool.filter(ref => ref !== bound)]
+      : balanced ? rotateAccountRefs(pool, this.accountCursor++) : base
     // A balanced request is not a fallback: the account it starts on is the
     // preferred one for this dispatch, so only a real failover reports a switch.
     const startRef = balanced ? ordered[0]! : preferred
+    // A removed account releases its sessions; a cooling one keeps its binding.
+    if (sessionKey !== undefined && (remembered === undefined || !refs.includes(remembered))) this.rememberSessionAccount(sessionKey, startRef)
     const dispatchUsable = balanced ? ordered.filter(ref => usable.includes(ref)) : usable
     const candidates = this.accountCandidates(snapshot.config, ordered, dispatchUsable, options.signal)
     let candidate = await candidates.next()
@@ -861,6 +892,10 @@ export class OpencodeGoAdapter extends LlmAdapter {
         }
         // Account observers persist selection and drive UI notices; a throwing
         // observer must not turn an already-successful stream into a failure.
+        // A remembered rejection only pauses an account, so the binding stays; a
+        // real failure moves the session for good, and later turns follow it so
+        // the new account stays cache-warm instead of flip-flopping back.
+        if (sessionKey !== undefined && failedRef !== undefined && serving !== startRef) this.rememberSessionAccount(sessionKey, serving)
         observe(() => this.options.onAccountSettled?.({ seq, generation: snapshot.generation, config: snapshot.config, ref: serving, notice }))
         observe(() => this.options.onAccountSwitch?.(notice, snapshot.config, seq))
       }

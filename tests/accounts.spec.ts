@@ -24,7 +24,7 @@ describe("seamless account fallback", () => {
     { id: 'b', name: 'Backup', apiKeyEnv: 'ACCOUNT_B' },
   ]
 
-  const request = () => ({ provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash', sessionId: 'account-session' as never,
+  const request = (sessionId: string | undefined | null = 'account-session') => ({ provider: 'dsh-opencode-go', model: 'deepseek-v4.1-flash', sessionId: (sessionId ?? undefined) as never,
     messages: [createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'plugin', plugin: 'test' } })] })
 
   const drain = async (stream: AsyncIterable<StreamChunk>) => { const chunks: StreamChunk[] = []; for await (const chunk of stream) chunks.push(chunk); return chunks }
@@ -73,23 +73,64 @@ describe("seamless account fallback", () => {
     expect(() => assertAccounts(Array.from({ length: 21 }, (_, i) => ({ id: String(i), name: String(i), apiKeyEnv: `KEY_${i}` })))).toThrow(/20/)
   })
 
-  it('starts balanced requests on the next account and never rewrites the saved order', async () => {
+  it('keeps a conversation on one account and rotates only across sessions', async () => {
     const gateway = await mockGateway({ status: 200, body: listingBody([request().model]) })
     const config = configOf(gateway.url, { accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true })
     const switched = vi.fn()
     const adapter = new OpencodeGoAdapter({ config: () => config, resolveApiKey: async config => `${config.apiKeyEnv}-secret`,
       onAccountSwitch: switched })
-    for (let turn = 0; turn < 4; turn += 1) {
+    const serve = async (sessionId: string): Promise<void> => {
       gateway.pushCompletions({ events: textEvents })
-      expect(await drain(adapter.stream(request())))
+      expect(await drain(adapter.stream(request(sessionId))))
         .toContainEqual(expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } }))
     }
+    await serve('session-1')
+    await serve('session-1')
+    await serve('session-2')
+    await serve('session-1')
+    await serve('session-3')
     const served = gateway.headers.map(header => header.authorization).filter(Boolean)
-    expect(served).toEqual(['Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret',
-      'Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret'])
+    // Staying on one account keeps its prompt cache warm; a new session takes the
+    // next account in the rotation so both subscriptions are still spent.
+    expect(served).toEqual(['Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret',
+      'Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_A-secret'])
     // Balancing is not a fallback: the saved primary and the notice stay put.
     expect(switched.mock.calls.every(([notice]) => notice === undefined)).toBe(true)
     expect(config.apiKeyEnv).toBe('ACCOUNT_A')
+  })
+
+  it('rotates every request when the host reports no session identity', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody([request().model]) })
+    const config = configOf(gateway.url, { accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true })
+    const adapter = new OpencodeGoAdapter({ config: () => config, resolveApiKey: async config => `${config.apiKeyEnv}-secret` })
+    for (let turn = 0; turn < 3; turn += 1) {
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request(null)))
+    }
+    expect(gateway.headers.map(header => header.authorization).filter(Boolean))
+      .toEqual(['Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret', 'Bearer ACCOUNT_A-secret'])
+  })
+
+  it('moves a failed conversation to the account that served it and keeps it there', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const gateway = await mockGateway({ status: 200, body: listingBody([request().model]) })
+      const config = configOf(gateway.url, { accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true, autoSwitch: true })
+      const adapter = new OpencodeGoAdapter({ config: () => config, resolveApiKey: async config => `${config.apiKeyEnv}-secret` })
+      gateway.pushCompletions({ status: 401, body: JSON.stringify({ error: { message: 'Invalid API key' } }) })
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('session-fail')))
+      // Let the rejection window lapse so the original account is eligible again:
+      // a session that only had been skipped would return to it, and one that
+      // really failed stays on the account that served it.
+      vi.setSystemTime(Date.now() + 6 * 60_000)
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('session-fail')))
+      expect(gateway.headers.map(header => header.authorization).filter(Boolean))
+        .toEqual(['Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret', 'Bearer ACCOUNT_B-secret'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it.each([

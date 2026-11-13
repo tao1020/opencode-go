@@ -79,8 +79,8 @@ The following patch configures shared accounts and per-model settings:
     # Free is off by default; opt in to the platform's free models
     # (same as Settings → Advanced settings → Free channel).
     freeEnabled: true
-    # Balance: start each request on the next account so both subscriptions
-    # are spent at once.
+    # Balance: a conversation sticks to one account; a new conversation takes
+    # the next account, so both subscriptions are spent at once.
     balanceAccounts: true
     freeBaseURL: https://opencode.ai/inference/v1
     proxyURL: http://127.0.0.1:7890
@@ -99,7 +99,7 @@ The following patch configures shared accounts and per-model settings:
 
 Keep the options you need and supply the corresponding keys through DSH credentials or environment variables. The first entry in `accounts` is current; the remaining entries are tried in order. The legacy `apiKeyEnv` reference must match the first entry. Manual and automatic switches move the target account first while preserving the other accounts' relative order. Existing configurations retain their selected account by moving it first.
 
-`balanceAccounts` rotates the starting account: each request begins on the next entry in the list, so several subscriptions are spent at the same time. It only changes where a request starts; the saved order and the current account are never rewritten, and a single account keeps its order. Balancing is independent of `autoSwitch` — turn both on when a request should continue on another account after one runs out. The Free route does not use it.
+`balanceAccounts` pins a conversation to one account, so its later turns reuse that account's prompt cache; only a new conversation takes the next entry in the list, which still spends several subscriptions at the same time. It only changes which account serves a request; the saved order and the current account are never rewritten, and a single account keeps its order. When the pinned account really fails and the request moves on, the conversation follows the new account instead of flipping back on the next turn. Balancing is independent of `autoSwitch` — turn both on when a request should continue on another account after one runs out. The Free route does not use it.
 
 | Option | Purpose |
 | --- | --- |
@@ -113,7 +113,7 @@ Keep the options you need and supply the corresponding keys through DSH credenti
 | `modelLimits` | Per-model `contextWindow` and `maxTokens` overrides, plus additional `thinkingBudgets` options; null uses defaults |
 | `maxImages` | Maximum images in one request's history; unset by default, with oldest images offloaded when exceeded |
 | `streamIdleTimeoutMs` | Maximum wait for the next stream event; defaults to 300000 milliseconds |
-| `balanceAccounts` | Rotate the starting account per request so several subscriptions are spent at once; defaults to `false`. Pair it with `autoSwitch` to continue on another account |
+| `balanceAccounts` | Keep a conversation on one account and give each new conversation the next account, so several subscriptions are spent at once; defaults to `false`. Pair it with `autoSwitch` to continue on another account |
 | `requestPreparationTimeoutMs` | Deadline for discovery and each attempt's credential/image preparation; defaults to 60000 milliseconds |
 | `requestTimeoutMs` | Whole dispatch deadline, including discovery, account fallback and streaming; defaults to 1800000 milliseconds. Prepared calls start this timer at dispatch |
 
