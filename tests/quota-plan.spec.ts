@@ -65,6 +65,23 @@ describe('quota-aware rotation', () => {
     expect(plan(['B', 'A'], quota)).toEqual(['A', 'B'])
   })
 
+  it('promotes a healthy remainder when its refill is within a week', () => {
+    const quota = new Map<string, QuotaReading>([['A', readingOf(80, 6 * DAY)], ['B', readingOf(40, 25 * DAY)]])
+    expect(plan(['A', 'B'], quota)).toEqual(['A', 'B'])
+  })
+
+  it('waits for the three-day window before spending a small remainder', () => {
+    const quota = new Map<string, QuotaReading>([['A', readingOf(90, 5 * DAY)], ['B', readingOf(80, 25 * DAY)]])
+    expect(plan(['A', 'B'], quota)).toEqual(['A', 'B'])
+  })
+
+  it('still spends a small remainder once its refill is within three days', () => {
+    const quota = new Map<string, QuotaReading>([['A', readingOf(90, 2 * DAY)], ['B', readingOf(80, 25 * DAY)]])
+    // The rotation picks B and B leads by only 10 points, so without the
+    // three-day rule the start would stay on B.
+    expect(plan(['B', 'A'], quota)).toEqual(['A', 'B'])
+  })
+
   it('holds back an account that is nearly empty', () => {
     const quota = new Map<string, QuotaReading>([['A', readingOf(98, 20 * DAY)], ['B', readingOf(99, 20 * DAY)],
       ['C', readingOf(50, 20 * DAY)]])

@@ -88,7 +88,7 @@ Account commands and automatic primary-account promotion share one in-memory ser
 
 Balancing ranks the starting account of a new conversation by the monthly allowance each account still holds (`src/quota-plan.ts`):
 
-- Allowance that refills within `QUOTA_EXPIRING_MS` (7 days) is spent first, soonest refill first; otherwise the fullest account leads.
+- Allowance that refills within `QUOTA_EXPIRING_WEEK_MS` (7 days) while more than `QUOTA_EXPIRING_WEEK_SHARE` (15%) remains, or within `QUOTA_EXPIRING_SOON_MS` (3 days) while at least `QUOTA_EXPIRING_SOON_SHARE` (10%) remains, is spent first — soonest refill first; otherwise the fullest account leads.
 - The rotation's own pick is kept unless the leader is at least `QUOTA_MARGIN` (30 percentage points) fuller, or the leader is about to lose its allowance, so near-equal accounts keep alternating and deep conversations keep their prompt cache.
 - Accounts below `QUOTA_LOW` (5%) sink behind the others; when every account is that empty the plain rotation stands.
 - `QuotaLedger` keeps the latest reading per account from every usage read (including the pill and console) and refreshes missing readings in the background at most once per `QUOTA_REFRESH_MS` (5 minutes). Routing never waits for a fetch: readings older than `QUOTA_FRESH_MS` (15 minutes), failed or partial sets fall back to plain rotation.
