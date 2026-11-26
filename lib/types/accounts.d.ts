@@ -78,6 +78,13 @@ export declare class GoAccountManager {
     private settingsGeneration;
     private latestSeq;
     private notice;
+    /**
+     * Explicit account choices made in the UI. Routing compares this version, so
+     * a request started after the user picked an account may leave a conversation
+     * pinned to an older one and may trust a key the user just replaced.
+     */
+    private selectionSeq;
+    private selectedRef;
     constructor(config: () => OpencodeGoConfig, logger: {
         warn(message: string): void;
     });
@@ -97,6 +104,12 @@ export declare class GoAccountManager {
     /** A freshness fence prevents an old request from overriding a later user choice. */
     capture(): number;
     credentialChanged(): void;
+    /** An explicit account choice outranks the stickiness of every conversation. */
+    selection(): {
+        seq: number;
+        ref?: string;
+    };
+    private rememberSelection;
     lastSwitch(): GoAccountSwitch | undefined;
     settle(event: GoAccountSettlement): void;
 }

@@ -82,6 +82,7 @@ Account commands and automatic primary-account promotion share one in-memory ser
 - **`AUTH` / `INVALID_CREDENTIAL`**: cools down the rejected key for 5 minutes (`REJECTED_KEY_TTL_MS`) and promotes the serving backup account to the first position when `autoSwitch` is enabled.
 - **`QUOTA` / `REGION_RESTRICTED`**: cools down the account for an hour (`UNAVAILABLE_KEY_TTL_MS`), so a month-long quota or a model outside the account's privacy region is not retried every few minutes; the serving backup is promoted in the same way.
 - **`RATE_LIMIT` (transient HTTP 429)**: cools down the key for upstream `providerRetryAfterMs` (defaulting to 15 seconds, bounded to `[1s, 5m]`) and borrows the backup account without rewriting the saved account order.
+- **Explicit choices**: `select` and `replace-key` bump the manager's selection version. The next request clears pinned conversations, resets the rotation cursor and drops that account's rejection, so the account the user just picked or re-keyed is tried immediately.
 
 ## Distribution and publishing
 

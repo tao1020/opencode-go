@@ -512,6 +512,13 @@ export interface OpencodeGoAdapterOptions extends OpencodeGoRequestExecutorOptio
   onCatalogRefresh?: () => void
   /** Host account-state version for actual requests, captured before asynchronous model discovery. */
   accountGeneration?: () => number
+  /**
+   * Explicit account choices, versioned by the Host. A request started after a
+   * newer choice may leave the account its conversation is pinned to, and the
+   * account the user just picked or re-keyed is tried again without waiting out
+   * a rejection recorded before that choice.
+   */
+  accountSelection?: () => { seq: number; ref?: string }
   /** Shared by both adapters so account settlement ordering spans both routes. */
   nextCallSequence?: () => number
   /** One outcome for both the displayed notice and the persisted selection. */
@@ -592,6 +599,9 @@ export class OpencodeGoAdapter extends LlmAdapter {
 
   /** Advances once per new conversation so balanced sessions spend accounts in turn. */
   private accountCursor = 0
+
+  /** Last explicit account choice the routing has already honored. */
+  private selectionSeq = 0
 
   /**
    * Pins a balanced conversation to one account. Consecutive turns then reuse
@@ -850,6 +860,16 @@ export class OpencodeGoAdapter extends LlmAdapter {
     const now = Date.now()
     const gateway = assertBaseURL(this.source === 'go' ? snapshot.config.baseURL : snapshot.config.freeBaseURL,
       this.source === 'go' ? 'baseURL' : 'freeBaseURL')
+    // A newer explicit choice outranks every pinned conversation: this request may
+    // start on the account the user picked, and that account is tried again even
+    // when it was rejected (or re-keyed) a moment earlier.
+    const selection = this.options.accountSelection?.()
+    if (selection !== undefined && selection.seq !== this.selectionSeq) {
+      this.selectionSeq = selection.seq
+      this.sessionAccounts.clear()
+      this.accountCursor = 0
+      if (selection.ref !== undefined) this.rejectedKeys.delete(selection.ref)
+    }
     // Expired rejections are pruned before every attempt, so the map stays
     // bounded by recently rejected references instead of growing with history.
     this.pruneRejectedKeys(now)

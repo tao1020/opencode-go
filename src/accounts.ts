@@ -137,6 +137,13 @@ export class GoAccountManager {
   private settingsGeneration = 0
   private latestSeq = -1
   private notice: GoAccountSwitch | undefined
+  /**
+   * Explicit account choices made in the UI. Routing compares this version, so
+   * a request started after the user picked an account may leave a conversation
+   * pinned to an older one and may trust a key the user just replaced.
+   */
+  private selectionSeq = 0
+  private selectedRef: string | undefined
 
   constructor(
     private readonly config: () => OpencodeGoConfig,
@@ -239,6 +246,7 @@ export class GoAccountManager {
       if (!info.writable) return 'rejected'
       if (!accountsOf(this.read(connection).value).some(entry => entry.id === account.id && entry.apiKeyEnv === command.ref)) return 'rejected'
       await credentials.set(credentialRef(command.ref), command.key.trim())
+      this.rememberSelection(command.ref)
       return 'applied'
     }
     if (command.kind === 'remove') {
@@ -283,11 +291,13 @@ export class GoAccountManager {
     }
     if (command.kind === 'select') {
       const next = [...moveAccountFirst(accounts, command.ref)]
-      return this.write(connection, {
+      const outcome = await this.write(connection, {
         accounts: next,
         apiKeyEnv: command.ref,
         ...syncedPlanPatch(next, value.goPlan),
       })
+      if (outcome === 'applied') this.rememberSelection(command.ref)
+      return outcome
     }
     const from = accounts.findIndex(account => account.apiKeyEnv === command.ref)
     if (from < 0 || command.toIndex >= accounts.length) return 'rejected'
@@ -321,6 +331,14 @@ export class GoAccountManager {
   }
 
   credentialChanged(): void { this.credentialGeneration++; this.capture() }
+
+  /** An explicit account choice outranks the stickiness of every conversation. */
+  selection(): { seq: number; ref?: string } { return { seq: this.selectionSeq, ref: this.selectedRef } }
+
+  private rememberSelection(ref: string): void {
+    this.selectionSeq += 1
+    this.selectedRef = ref
+  }
   lastSwitch(): GoAccountSwitch | undefined { this.capture(); return this.notice }
 
   settle(event: GoAccountSettlement): void {
