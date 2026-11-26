@@ -5,8 +5,12 @@ import { type GoUsage } from './contracts.ts'
 export const QUOTA_FRESH_MS = 15 * 60_000
 /** Refresh a reading at most this often; routing never waits for a refresh. */
 export const QUOTA_REFRESH_MS = 5 * 60_000
-/** Allowance that refills within this horizon is spent before allowance that lasts. */
-export const QUOTA_EXPIRING_MS = 7 * 24 * 60 * 60_000
+/** Allowance that refills within a week is spent first when this much still remains. */
+export const QUOTA_EXPIRING_WEEK_MS = 7 * 24 * 60 * 60_000
+export const QUOTA_EXPIRING_WEEK_SHARE = 0.15
+/** Closer to the refill, a smaller remainder still justifies spending it first. */
+export const QUOTA_EXPIRING_SOON_MS = 3 * 24 * 60 * 60_000
+export const QUOTA_EXPIRING_SOON_SHARE = 0.10
 /** An account this empty is held back for conversations that are already on it. */
 export const QUOTA_LOW = 0.05
 /** Only override the rotation when the fuller account leads by this share. */
@@ -36,8 +40,10 @@ export function quotaReading(usage: GoUsage, at: number): QuotaReading {
 /**
  * Order the accounts a new conversation may start on:
  *
- * 1. Allowance that refills within `QUOTA_EXPIRING_MS` goes first, soonest
- *    refill first — unused allowance is lost when the window ends.
+ * 1. Allowance that refills within a week while more than
+ *    `QUOTA_EXPIRING_WEEK_SHARE` remains, or within three days while at least
+ *    `QUOTA_EXPIRING_SOON_SHARE` remains, goes first — soonest refill first,
+ *    because unused allowance is lost when the window ends.
  * 2. The rest follow by remaining allowance, fullest first.
  * 3. Accounts below `QUOTA_LOW` sink to the end.
  *
@@ -63,7 +69,11 @@ export function planAccountOrder(input: {
   const readings = order.map(ref => fresh(ref))
   if (readings.some(reading => reading === undefined)) return order
   const low = (reading: QuotaReading): boolean => reading.remaining < QUOTA_LOW
-  const expiring = (reading: QuotaReading): boolean => reading.resetsAt - nowMs <= QUOTA_EXPIRING_MS
+  const expiring = (reading: QuotaReading): boolean => {
+    const until = reading.resetsAt - nowMs
+    if (until <= QUOTA_EXPIRING_SOON_MS) return reading.remaining >= QUOTA_EXPIRING_SOON_SHARE
+    return until <= QUOTA_EXPIRING_WEEK_MS && reading.remaining > QUOTA_EXPIRING_WEEK_SHARE
+  }
   const ranked = order
     .filter((_, index) => !low(readings[index]!))
     .sort((left, right) => {

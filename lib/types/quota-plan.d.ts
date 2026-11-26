@@ -4,8 +4,12 @@ import { type GoUsage } from './contracts.ts';
 export declare const QUOTA_FRESH_MS: number;
 /** Refresh a reading at most this often; routing never waits for a refresh. */
 export declare const QUOTA_REFRESH_MS: number;
-/** Allowance that refills within this horizon is spent before allowance that lasts. */
-export declare const QUOTA_EXPIRING_MS: number;
+/** Allowance that refills within a week is spent first when this much still remains. */
+export declare const QUOTA_EXPIRING_WEEK_MS: number;
+export declare const QUOTA_EXPIRING_WEEK_SHARE = 0.15;
+/** Closer to the refill, a smaller remainder still justifies spending it first. */
+export declare const QUOTA_EXPIRING_SOON_MS: number;
+export declare const QUOTA_EXPIRING_SOON_SHARE = 0.1;
 /** An account this empty is held back for conversations that are already on it. */
 export declare const QUOTA_LOW = 0.05;
 /** Only override the rotation when the fuller account leads by this share. */
@@ -23,8 +27,10 @@ export declare function quotaReading(usage: GoUsage, at: number): QuotaReading;
 /**
  * Order the accounts a new conversation may start on:
  *
- * 1. Allowance that refills within `QUOTA_EXPIRING_MS` goes first, soonest
- *    refill first — unused allowance is lost when the window ends.
+ * 1. Allowance that refills within a week while more than
+ *    `QUOTA_EXPIRING_WEEK_SHARE` remains, or within three days while at least
+ *    `QUOTA_EXPIRING_SOON_SHARE` remains, goes first — soonest refill first,
+ *    because unused allowance is lost when the window ends.
  * 2. The rest follow by remaining allowance, fullest first.
  * 3. Accounts below `QUOTA_LOW` sink to the end.
  *
