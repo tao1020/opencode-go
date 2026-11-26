@@ -8,6 +8,7 @@ import { type CompatibleImageRequestTarget } from './conversion.ts';
 import { type PrivacyMaskClient } from './privacy.ts';
 import { ProxyTransport } from './transport.ts';
 import { OpencodeGoCatalog } from './catalog.ts';
+import { type QuotaReading } from './quota-plan.ts';
 import { FreeBunTransport } from './free-transport.ts';
 import { FreeChannelState } from './free-channel.ts';
 /**
@@ -147,6 +148,10 @@ export interface OpencodeGoAdapterOptions extends OpencodeGoRequestExecutorOptio
         seq: number;
         ref?: string;
     };
+    /** Latest official remaining-quota reading per account reference. */
+    accountQuota?: () => ReadonlyMap<string, QuotaReading>;
+    /** Ask the Host to refresh quota for these accounts; routing never waits for it. */
+    refreshAccountQuota?: (refs: readonly string[]) => void;
     /** Shared by both adapters so account settlement ordering spans both routes. */
     nextCallSequence?: () => number;
     /** One outcome for both the displayed notice and the persisted selection. */
@@ -253,6 +258,13 @@ export declare class OpencodeGoAdapter extends LlmAdapter {
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
     private streamWithSnapshot;
     private dispatch;
+    /**
+     * Start a new conversation on the account with the most spendable allowance.
+     * The rotation still supplies the base order and the tie-breaker; quota only
+     * promotes an account that is clearly fuller or about to refill, so nearly
+     * equal accounts keep alternating and the prompt cache stays warm.
+     */
+    private quotaOrder;
     private streamAccounts;
     /** Resolve Free keys only when selecting an account or retrying a failed attempt. */
     private accountCandidates;

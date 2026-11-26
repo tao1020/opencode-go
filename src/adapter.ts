@@ -63,6 +63,7 @@ import {
   gatewayKeyRejectionTtlMs,
   REJECTED_KEY_TTL_MS,
 } from './accounts.ts'
+import { planAccountOrder, type QuotaReading } from './quota-plan.ts'
 import { FreeBunTransport, OPENCODE_FREE_USER_AGENT } from './free-transport.ts'
 import { FreeChannelState } from './free-channel.ts'
 
@@ -519,6 +520,10 @@ export interface OpencodeGoAdapterOptions extends OpencodeGoRequestExecutorOptio
    * a rejection recorded before that choice.
    */
   accountSelection?: () => { seq: number; ref?: string }
+  /** Latest official remaining-quota reading per account reference. */
+  accountQuota?: () => ReadonlyMap<string, QuotaReading>
+  /** Ask the Host to refresh quota for these accounts; routing never waits for it. */
+  refreshAccountQuota?: (refs: readonly string[]) => void
   /** Shared by both adapters so account settlement ordering spans both routes. */
   nextCallSequence?: () => number
   /** One outcome for both the displayed notice and the persisted selection. */
@@ -821,6 +826,20 @@ export class OpencodeGoAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * Start a new conversation on the account with the most spendable allowance.
+   * The rotation still supplies the base order and the tie-breaker; quota only
+   * promotes an account that is clearly fuller or about to refill, so nearly
+   * equal accounts keep alternating and the prompt cache stays warm.
+   */
+  private quotaOrder(pool: readonly string[]): string[] {
+    const rotated = rotateAccountRefs([...pool], this.accountCursor++)
+    const quota = this.options.accountQuota?.()
+    if (quota === undefined) return [...rotated]
+    this.options.refreshAccountQuota?.(rotated)
+    return planAccountOrder({ refs: rotated, quota })
+  }
+
   private async *streamAccounts(options: GenerateOptions, snapshot: OpencodeGoDispatchSnapshot, seq: number): AsyncIterable<StreamChunk> {
     const streamPublic = () => this.requestExecutor.stream(options, { config: snapshot.config, model: snapshot.model,
       provider: snapshot.catalog.provider, sessionId: snapshot.sessionId, apiKey: 'public' })
@@ -889,7 +908,7 @@ export class OpencodeGoAdapter extends LlmAdapter {
     const remembered = sessionKey === undefined ? undefined : this.sessionAccounts.get(sessionKey)
     const bound = remembered !== undefined && refs.includes(remembered) && usable.includes(remembered) ? remembered : undefined
     const ordered = bound !== undefined ? [bound, ...pool.filter(ref => ref !== bound)]
-      : balanced ? rotateAccountRefs(pool, this.accountCursor++) : base
+      : balanced ? this.quotaOrder(pool) : base
     // A balanced request is not a fallback: the account it starts on is the
     // preferred one for this dispatch, so only a real failover reports a switch.
     const startRef = balanced ? ordered[0]! : preferred

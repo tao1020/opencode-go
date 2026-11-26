@@ -30,6 +30,7 @@ import {
   validateGoConfig,
 } from './config.ts'
 import { GoUsageService, GoAccountManager, GoAccountsService } from './accounts.ts'
+import { QuotaLedger } from './quota-plan.ts'
 import { GoAnalyticsService } from './analytics.ts'
 import { accountsOf, accountRefOf, PROFILE_ENTRY_ID, SETTINGS_NAMESPACE, goRemote } from './contracts.ts'
 import { ProxyTransport } from './transport.ts'
@@ -152,6 +153,13 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
   })
   const transport = new ProxyTransport()
   ctx.effect(() => () => transport.dispose())
+  // Routing ranks accounts by the allowance each one still holds. Every usage
+  // read feeds this ledger; reads started by routing stay in the background.
+  const quotaLedger = new QuotaLedger(async ref => {
+    const usage = ctx.get('opencodeGoUsage') as GoUsageService | undefined
+    if (usage === undefined) throw new Error('OpenCode Go usage service is not ready')
+    return usage.readAccount(ref)
+  })
   ctx.plugin(GoUsageService, {
     baseURL: () => current().baseURL,
     proxyURL: () => current().proxyURL,
@@ -160,6 +168,7 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
     activeRef: () => accountRefOf(current()),
     accountRefs: () => accountsOf(current()).map(account => account.apiKeyEnv),
     lastSwitch: () => accountManager.lastSwitch(),
+    onUsage: (ref: string, usage: import('./contracts.ts').GoUsage) => quotaLedger.record(ref, usage),
   })
   const logger = {
     fallback: ({ url, error }: { url: string; error: unknown; kept: number }): void => {
@@ -191,6 +200,8 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
     resolveApiKey,
     accountGeneration: () => accountManager.capture(),
     accountSelection: () => accountManager.selection(),
+    accountQuota: () => quotaLedger.snapshot(),
+    refreshAccountQuota: (refs: readonly string[]) => quotaLedger.refresh(refs),
     nextCallSequence: () => ++callSequence,
     onAccountSettled: (event: import('./adapter.ts').GoAccountSettlement) => { accountManager.settle(event) },
     imageAccess: {

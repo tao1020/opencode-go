@@ -84,6 +84,15 @@ Account commands and automatic primary-account promotion share one in-memory ser
 - **`RATE_LIMIT` (transient HTTP 429)**: cools down the key for upstream `providerRetryAfterMs` (defaulting to 15 seconds, bounded to `[1s, 5m]`) and borrows the backup account without rewriting the saved account order.
 - **Explicit choices**: `select` and `replace-key` bump the manager's selection version. The next request clears pinned conversations, resets the rotation cursor and drops that account's rejection, so the account the user just picked or re-keyed is tried immediately.
 
+### Quota-aware rotation
+
+Balancing ranks the starting account of a new conversation by the monthly allowance each account still holds (`src/quota-plan.ts`):
+
+- Allowance that refills within `QUOTA_EXPIRING_MS` (7 days) is spent first, soonest refill first; otherwise the fullest account leads.
+- The rotation's own pick is kept unless the leader is at least `QUOTA_MARGIN` (30 percentage points) fuller, or the leader is about to lose its allowance, so near-equal accounts keep alternating and deep conversations keep their prompt cache.
+- Accounts below `QUOTA_LOW` (5%) sink behind the others; when every account is that empty the plain rotation stands.
+- `QuotaLedger` keeps the latest reading per account from every usage read (including the pill and console) and refreshes missing readings in the background at most once per `QUOTA_REFRESH_MS` (5 minutes). Routing never waits for a fetch: readings older than `QUOTA_FRESH_MS` (15 minutes), failed or partial sets fall back to plain rotation.
+
 ## Distribution and publishing
 
 The `.` and `./client` exports point to the built host entry (`lib/index.js`) and browser factory (`lib/client.js`). Free declares official `@oven/bun-*` platform packages directly as optional dependencies pinned to `1.4.4`, so installing the runtime requires no `postinstall` build script or approval.

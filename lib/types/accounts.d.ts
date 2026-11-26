@@ -129,6 +129,8 @@ interface UsageOptions {
     activeRef?: () => string;
     accountRefs?: () => readonly string[];
     lastSwitch?: () => GoAccountSwitch | undefined;
+    /** Receives every successful reading so routing can rank accounts by allowance. */
+    onUsage?: (ref: string, usage: GoUsage) => void;
 }
 /** Account statistics are fetched on the Host; credentials never enter the browser. */
 export declare class GoUsageService extends TypertRemoteService {
