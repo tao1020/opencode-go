@@ -389,6 +389,8 @@ interface UsageOptions {
   activeRef?: () => string
   accountRefs?: () => readonly string[]
   lastSwitch?: () => GoAccountSwitch | undefined
+  /** Receives every successful reading so routing can rank accounts by allowance. */
+  onUsage?: (ref: string, usage: GoUsage) => void
 }
 
 /** Account statistics are fetched on the Host; credentials never enter the browser. */
@@ -461,7 +463,11 @@ export class GoUsageService extends TypertRemoteService {
     if (shared) return shared
     const pending = this.fetchUsage(baseURL, key, source, proxyURL, this.transport.forProxy(proxyURL))
     this.pending.set(source, pending)
-    try { return await pending } finally { this.pending.delete(source) }
+    try {
+      const usage = await pending
+      if (ref !== undefined) this.options.onUsage?.(ref, usage)
+      return usage
+    } finally { this.pending.delete(source) }
   }
 
   private async fetchUsage(baseURL: string, key: string, source: string, proxyURL: string, fetcher?: typeof globalThis.fetch): Promise<GoUsage> {

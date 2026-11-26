@@ -17,6 +17,7 @@ import { OpencodeGoAdapter, OpencodeGoRequestExecutor } from '../src/adapter.ts'
 import { accountFallback, gatewayKeyRejectionTtlMs, isGatewayKeyRejection } from '../src/accounts.ts'
 import { apply } from '../src/index.ts'
 import { mockGateway, listingBody, textEvents, closeMockGateways } from './support/gateway.ts'
+import { quotaReading } from '../src/quota-plan.ts'
 
 describe("seamless account fallback", () => {
   const accounts = [
@@ -861,6 +862,65 @@ describe('serialized account commands and primary selection', () => {
       clock.mockReturnValue(now + ttlMs + 1)
       gateway.pushCompletions({ events: textEvents }); await drain(adapter.stream(requestOf()))
       expect(gateway.headers.at(-1)?.authorization).toBe('Bearer PRIMARY_KEY')
+    } finally { await adapter.dispose() }
+  })
+})
+
+describe('quota-aware rotation', () => {
+  const accounts = [
+    { id: 'a', name: 'Primary', apiKeyEnv: 'ACCOUNT_A' },
+    { id: 'b', name: 'Backup', apiKeyEnv: 'ACCOUNT_B' },
+  ]
+  const model = 'deepseek-v4.1-flash'
+  const request = (sessionId: string) => ({ provider: 'dsh-opencode-go', model, sessionId: sessionId as never,
+    messages: [createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'plugin', plugin: 'test' } })] })
+  const reading = (usedPercent: number) => quotaReading({ rolling: { status: 'ok' as const, percent: 0,
+    resetsAt: new Date(Date.now() + 60 * 60_000).toISOString() },
+  weekly: { status: 'ok' as const, percent: 0, resetsAt: new Date(Date.now() + 86_400_000).toISOString() },
+  monthly: { status: 'ok' as const, percent: usedPercent, resetsAt: new Date(Date.now() + 20 * 86_400_000).toISOString() } },
+  Date.now())
+
+  afterEach(closeMockGateways)
+
+  it('starts a new conversation on the account that still holds more allowance, then keeps it pinned', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody([model]) })
+    const quota = new Map([['ACCOUNT_A', reading(80)], ['ACCOUNT_B', reading(40)]])
+    const refresh = vi.fn()
+    const adapter = new OpencodeGoAdapter({ config: () => configOf(gateway.url, { accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true }),
+      resolveApiKey: async config => config.apiKeyEnv, accountQuota: () => quota, refreshAccountQuota: refresh })
+    try {
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('quota-session')))
+      expect(gateway.headers.at(-1)?.authorization).toBe('Bearer ACCOUNT_B')
+      // Routing asks the Host to refresh the readings, but already ranks by the cached ones.
+      expect(refresh).toHaveBeenCalledWith(['ACCOUNT_A', 'ACCOUNT_B'])
+      // A conversation keeps its account for the prompt cache even when another
+      // account becomes fuller, so a session never pays to re-send its transcript.
+      quota.set('ACCOUNT_A', reading(20))
+      quota.set('ACCOUNT_B', reading(90))
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('quota-session')))
+      expect(gateway.headers.at(-1)?.authorization).toBe('Bearer ACCOUNT_B')
+      // A new conversation, however, moves to the account with more left.
+      quota.set('ACCOUNT_A', reading(20))
+      quota.set('ACCOUNT_B', reading(90))
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('quota-other')))
+      expect(gateway.headers.at(-1)?.authorization).toBe('Bearer ACCOUNT_A')
+    } finally { await adapter.dispose() }
+  })
+
+  it('falls back to plain rotation without quota readings', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody([model]) })
+    const adapter = new OpencodeGoAdapter({ config: () => configOf(gateway.url, { accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true }),
+      resolveApiKey: async config => config.apiKeyEnv })
+    try {
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('plain-1')))
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('plain-2')))
+      expect(gateway.headers.filter(header => header.authorization).map(header => header.authorization))
+        .toEqual(['Bearer ACCOUNT_A', 'Bearer ACCOUNT_B'])
     } finally { await adapter.dispose() }
   })
 })
