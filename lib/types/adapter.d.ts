@@ -137,6 +137,16 @@ export interface OpencodeGoAdapterOptions extends OpencodeGoRequestExecutorOptio
     onCatalogRefresh?: () => void;
     /** Host account-state version for actual requests, captured before asynchronous model discovery. */
     accountGeneration?: () => number;
+    /**
+     * Explicit account choices, versioned by the Host. A request started after a
+     * newer choice may leave the account its conversation is pinned to, and the
+     * account the user just picked or re-keyed is tried again without waiting out
+     * a rejection recorded before that choice.
+     */
+    accountSelection?: () => {
+        seq: number;
+        ref?: string;
+    };
     /** Shared by both adapters so account settlement ordering spans both routes. */
     nextCallSequence?: () => number;
     /** One outcome for both the displayed notice and the persisted selection. */
@@ -178,6 +188,8 @@ export declare class OpencodeGoAdapter extends LlmAdapter {
     private credentialEpoch;
     /** Advances once per new conversation so balanced sessions spend accounts in turn. */
     private accountCursor;
+    /** Last explicit account choice the routing has already honored. */
+    private selectionSeq;
     /**
      * Pins a balanced conversation to one account. Consecutive turns then reuse
      * that account's prompt cache instead of re-sending the whole transcript to a

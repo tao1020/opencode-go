@@ -190,6 +190,7 @@ export function apply(ctx: Context, raw?: OpencodeGoConfig | LiveConfig): void {
     config: () => current(),
     resolveApiKey,
     accountGeneration: () => accountManager.capture(),
+    accountSelection: () => accountManager.selection(),
     nextCallSequence: () => ++callSequence,
     onAccountSettled: (event: import('./adapter.ts').GoAccountSettlement) => { accountManager.settle(event) },
     imageAccess: {

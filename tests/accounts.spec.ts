@@ -162,6 +162,63 @@ describe("seamless account fallback", () => {
     } finally { await adapter.dispose() }
   })
 
+  it('moves a balanced conversation to the account the user picks', async () => {
+    const gateway = await mockGateway({ status: 200, body: listingBody([request().model]) })
+    const host = accountHarness({ baseURL: gateway.url, accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true, autoSwitch: false })
+    const adapter = new OpencodeGoAdapter({ config: host.value, resolveApiKey: async config => `${config.apiKeyEnv}-secret`,
+      accountGeneration: () => host.manager.capture(), accountSelection: () => host.manager.selection(),
+      onAccountSettled: event => host.manager.settle(event) })
+    try {
+      const serve = async (sessionId: string): Promise<void> => {
+        gateway.pushCompletions({ events: textEvents })
+        await drain(adapter.stream(request(sessionId)))
+      }
+      await serve('picked-session')
+      await serve('picked-session')
+      // Picking the backup in the UI is explicit: the conversation follows it
+      // instead of staying pinned to the account it was already using.
+      expect(await host.manager.execute({ kind: 'select', ref: 'ACCOUNT_B' })).toBe('applied')
+      await serve('picked-session')
+      await serve('picked-session')
+      expect(gateway.headers.filter(header => header.authorization).map(header => header.authorization))
+        .toEqual(['Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret', 'Bearer ACCOUNT_B-secret'])
+      // The UI action persists the choice; routing never writes it back.
+      expect(host.value().apiKeyEnv).toBe('ACCOUNT_B')
+      expect(host.settings.mutate).toHaveBeenCalledTimes(1)
+    } finally { await adapter.dispose() }
+  })
+
+  it.each([
+    { action: 'select' as const },
+    { action: 'replace-key' as const },
+  ])('tries an account again right after the user $action on it', async ({ action }) => {
+    const gateway = await mockGateway({ status: 200, body: listingBody([request().model]) })
+    const host = accountHarness({ baseURL: gateway.url, accounts, apiKeyEnv: 'ACCOUNT_A', balanceAccounts: true, autoSwitch: false })
+    const adapter = new OpencodeGoAdapter({ config: host.value, resolveApiKey: async config => `${config.apiKeyEnv}-secret`,
+      accountGeneration: () => host.manager.capture(), accountSelection: () => host.manager.selection(),
+      onAccountSettled: event => host.manager.settle(event) })
+    try {
+      const serve = async (sessionId: string): Promise<void> => {
+        gateway.pushCompletions({ events: textEvents })
+        await drain(adapter.stream(request(sessionId)))
+      }
+      gateway.pushCompletions({ status: 401, body: JSON.stringify({ error: { message: 'Invalid API key' } }) })
+      gateway.pushCompletions({ events: textEvents })
+      await drain(adapter.stream(request('rejected-session')))
+      // ACCOUNT_A is cooling down, so a new conversation has to borrow ACCOUNT_B.
+      await serve('later-session')
+      const command: AccountCommand = action === 'select'
+        ? { kind: 'select', ref: 'ACCOUNT_A' }
+        : { kind: 'replace-key', ref: 'ACCOUNT_A', key: 'recovered-key' }
+      expect(await host.manager.execute(command)).toBe('applied')
+      // Acting on the account clears its stale rejection: the next conversation
+      // may start there again, without waiting out the cooldown.
+      await serve('after-choice')
+      expect(gateway.headers.map(header => header.authorization).filter(Boolean))
+        .toEqual(['Bearer ACCOUNT_A-secret', 'Bearer ACCOUNT_B-secret', 'Bearer ACCOUNT_B-secret', 'Bearer ACCOUNT_A-secret'])
+    } finally { await adapter.dispose() }
+  })
+
   it.each([
     { status: 401, message: 'Invalid API key', reason: 'credential' },
     { status: 429, message: 'Too many requests', reason: 'rate-limit' },
